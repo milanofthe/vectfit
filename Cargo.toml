@@ -1,0 +1,15 @@
+[package]
+name = "vectfit"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Milan Rother"]
+description = "Fast relaxed vector fitting: rational macromodels of multiport frequency responses with common poles, automatic order, passivity enforcement and Verilog-A export"
+repository = "https://github.com/milanofthe/vectfit"
+keywords = ["vector-fitting", "macromodel", "s-parameters", "rational", "passivity"]
+categories = ["science", "mathematics"]
+
+[dependencies]
+num-complex = "0.4"
+faer = "0.24"
+rayon = "1"
