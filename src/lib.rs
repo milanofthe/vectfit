@@ -2,7 +2,7 @@
 //! 2006; multiport, Deschrijver 2008) with automatic order selection by adding-and-skimming
 //! (Grivet-Talocia-Bandinu 2006) — a set-valued macromodel of a matrix response on the jω axis
 //! with COMMON poles. Ported (compact, clean-room from the algorithm) from the author's
-//! `vectorfitting` Python package.
+//! Python package [Vectorfitting](https://github.com/milanofthe/Vectorfitting).
 //!
 //! Self-contained: depends only on `faer` (dense LS/eigensolve) and `num_complex`, so this module
 //! is extractable as a standalone crate. [`fit`] is the fixed-order primitive; [`fit_auto`] grows

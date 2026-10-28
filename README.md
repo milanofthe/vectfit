@@ -6,6 +6,8 @@ It fits sampled responses (S, Y or Z parameters over frequency) with a common se
 
 The crate depends only on `faer`, `num-complex` and `rayon`. The fit is bit-identical across thread counts.
 
+It is a Rust port of the Python implementation [Vectorfitting](https://github.com/milanofthe/Vectorfitting).
+
 ## License
 
 MIT
