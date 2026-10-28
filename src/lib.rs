@@ -48,14 +48,16 @@ macro_rules! vflog {
 }
 pub(crate) use vflog;
 
+mod delay;
 mod engine;
 pub mod export;
 mod model;
 pub mod passivity;
 pub mod ratmodel;
 
+pub use delay::phase_slope;
 pub use engine::fit as fit_order;
-pub use engine::{fit_auto, fit_auto_with}; // production entry points; return `model::VfModel`
+pub use engine::{fit_auto, fit_auto_opts, fit_auto_with, fit_residues, Options}; // production entry points; return `model::VfModel`
 pub use model::VfModel;
 
 #[cfg(test)]
@@ -134,5 +136,28 @@ mod tests {
             "over-parametrised: order {}",
             m.n_support()
         );
+    }
+
+    /// A handful of samples (the first solves of a sweep, DC among them): the order stays below
+    /// the sample count, a sample alone gives the constant through it.
+    #[test]
+    fn few_samples_give_a_model_of_fewer_poles() {
+        let opts = Options {
+            proportional: false,
+            relative: false,
+            ..Options::default()
+        };
+        for ns in 1..6usize {
+            let s: Vec<C> = (0..ns).map(|i| C::new(0.0, i as f64 / 4.0)).collect();
+            let data: Vec<Vec<C>> = s
+                .iter()
+                .map(|&z| vec![C::new(1.0, 0.0) / (z + 1.0), C::new(0.5, 0.0)])
+                .collect();
+            let m = fit_auto_opts(&s, &data, 1e-9, ns - 1, &opts);
+            assert!(m.order() < ns, "{ns} samples, {} poles", m.order());
+            if ns == 1 {
+                assert!((m.eval(s[0])[0] - data[0][0]).norm() < 1e-12);
+            }
+        }
     }
 }

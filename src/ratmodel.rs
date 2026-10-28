@@ -114,25 +114,18 @@ impl RationalModel {
             .collect()
     }
 
-    /// Max relative error of the current model vs the stored fit samples (per entry, floored by
-    /// `1e-4·max|entry|` so an in-band null cannot blow the ratio up). Used to report the effect of
-    /// passivity enforcement on fit quality.
+    /// Max relative error of the current model vs the stored fit samples, in the relative
+    /// weights the fit itself is judged on (`engine::weights`: per entry, the magnitude floored so
+    /// an in-band null cannot blow the ratio up). Used to report the effect of passivity
+    /// enforcement on fit quality.
     pub fn sample_error(&self) -> f64 {
         let p2 = self.n_ports * self.n_ports;
-        let mut emax = vec![0.0f64; p2];
-        for row in &self.fit_data {
-            for e in 0..p2 {
-                emax[e] = emax[e].max(row[e].norm());
-            }
-        }
+        let wt = crate::engine::weights(&self.fit_data, true);
         let mut worst = 0.0f64;
         for (k, &f) in self.fit_freqs.iter().enumerate() {
             let got = self.eval(f);
             for e in 0..p2 {
-                let floor = (1e-4 * emax[e]).max(1e-300);
-                worst = worst.max(
-                    (got[e] - self.fit_data[k][e]).norm() / self.fit_data[k][e].norm().max(floor),
-                );
+                worst = worst.max((got[e] - self.fit_data[k][e]).norm() * wt[k][e]);
             }
         }
         worst
@@ -152,6 +145,10 @@ impl RationalModel {
         fit_freqs: Vec<f64>,
         fit_data: Vec<Vec<C>>,
     ) -> Self {
+        assert!(
+            vf.delay.iter().all(|&t| t == 0.0),
+            "a fit with delays has no rational admittance form"
+        );
         let k = TAU * fmax_hz; // normalisation constant s_n = s / K
         let p2 = n_ports * n_ports;
         // Split the expanded pole set into real poles and c.c.-pair representatives (Im > 0).
