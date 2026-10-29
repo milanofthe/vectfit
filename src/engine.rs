@@ -75,6 +75,16 @@ fn fill_x_into(
 /// Absolute: every equation alike, the error an absolute one (a response with an absolute
 /// tolerance, as S, whose -80 dB couplings would otherwise be fitted to the relative accuracy
 /// of the others, noise and all).
+/// The magnitude floor of a relative weight, as a share of the entry's median magnitude
+/// ([`weights`]). Source: not measured; set with the relative weighting, low enough that the
+/// off-resonance band of an entry keeps its own relative accuracy.
+const REL_FLOOR_MEDIAN: f64 = 0.05;
+
+/// The magnitude floor of a relative weight, as a share of the entry's peak magnitude
+/// ([`weights`]): a true transmission zero is weighted as at most this far below the peak, not
+/// as noise to be fitted exactly. Source: not measured; set with the relative weighting.
+const REL_FLOOR_PEAK: f64 = 1e-6;
+
 pub(crate) fn weights(data: &[Vec<C>], relative: bool) -> Vec<Vec<f64>> {
     let nf = data[0].len();
     if !relative {
@@ -85,7 +95,9 @@ pub(crate) fn weights(data: &[Vec<C>], relative: bool) -> Vec<Vec<f64>> {
             let mut mags: Vec<f64> = data.iter().map(|row| row[e].norm()).collect();
             mags.sort_by(f64::total_cmp);
             let (med, peak) = (mags[mags.len() / 2], mags[mags.len() - 1]);
-            (0.05 * med).max(1e-6 * peak).max(1e-300)
+            (REL_FLOOR_MEDIAN * med)
+                .max(REL_FLOOR_PEAK * peak)
+                .max(f64::MIN_POSITIVE)
         })
         .collect();
     data.iter()
@@ -663,18 +675,23 @@ impl<'a> Vf<'a> {
     }
 }
 
+/// The damping of a starting pole as a share of its frequency: `-a + jb` with `a = b * this`
+/// (Gustavsen and Semlyen 1999, `a = b / 100` for complex starting poles); the real starting
+/// poles and the pairs seeded while the order grows take the same share.
+const START_DAMPING: f64 = 0.01;
+
 /// Even-spread, lightly-damped (left-half-plane) initial poles across the band.
 fn spread_cpx(n: usize, wmax: f64) -> Vec<C> {
     (0..n)
         .map(|i| {
             let w = wmax * (i as f64 + 1.0) / (n as f64 + 1.0);
-            C::new(-w / 100.0, w)
+            C::new(-w * START_DAMPING, w)
         })
         .collect()
 }
 fn spread_real(n: usize, wmax: f64) -> Vec<f64> {
     (0..n)
-        .map(|i| -wmax * (i as f64 + 1.0) / (n as f64 + 1.0) / 50.0)
+        .map(|i| -wmax * (i as f64 + 1.0) / (n as f64 + 1.0) * START_DAMPING)
         .collect()
 }
 
@@ -965,7 +982,7 @@ pub fn fit_auto_opts(
         let k = vf.worst_sample(&tried);
         tried.push(k);
         let w = s[k].im.abs().max(wlo);
-        vf.pc.push(C::new(-w / 100.0, w));
+        vf.pc.push(C::new(-w * START_DAMPING, w));
         vf.compute_residues();
         vf.relocate(tol, opts.relocations);
         // Guarded skim: the energy criterion compares against the MEAN pole energy,
