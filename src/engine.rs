@@ -2,6 +2,12 @@
 //! relocation → residue fit), the fixed-order [`fit`], and the automatic-order [`fit_auto`] with
 //! Grivet-Talocia/Bandinu-style *adding and skimming* — grow the pole set at the worst-error band,
 //! drop spurious poles by their band-limited energy, until the response is met with a minimal set.
+//!
+//! [`fit_auto_opts`] takes the basis, the weighting, per-entry delays, the poles to start from and
+//! the parameters of the order search as [`Options`]. With absolute weights the residue basis is
+//! the same for every entry (one factorisation for all), and a response of more entries than real
+//! equations a sample identifies its poles on the real combinations of its entries that span it
+//! (the many-port compression: the least-squares residual of any pole set is the same).
 
 use faer::linalg::solvers::SolveLstsq;
 use faer::Mat;
@@ -52,18 +58,124 @@ fn fill_x_into(
     xf[o..].copy_from_slice(xs);
 }
 
+/// The least-squares weight of every equation, `wt[sample][entry]`: the one definition of the
+/// error a fit is judged on (the fit itself, [`crate::ratmodel::RationalModel::sample_error`]).
+///
+/// Relative (`relative`): the inverse magnitude of the sample. A matrix response spans a huge
+/// magnitude range across entries (a spiral's off-diagonal Y is ~1000× its diagonal); plain
+/// absolute least-squares fits the large entries and leaves the small ones at ~10% relative
+/// error — invisible to an absolute residual, so the order growth stops too early. Weighting
+/// every equation by 1/|data| makes each entry fit to its OWN relative accuracy and the
+/// convergence metric track relative error. The magnitude is floored per entry at a share of
+/// its MEDIAN magnitude, not the band peak: a sharp resonance peak would otherwise raise the
+/// floor so far that every off-peak sample of the entry is under-weighted — the fit then reports
+/// convergence while the off-peak band (where L/Q curves live) is wrong. The small peak term
+/// keeps true transmission zeros from being weighted as noise.
+///
+/// Absolute: every equation alike, the error an absolute one (a response with an absolute
+/// tolerance, as S, whose -80 dB couplings would otherwise be fitted to the relative accuracy
+/// of the others, noise and all).
+/// The magnitude floor of a relative weight, as a share of the entry's median magnitude
+/// ([`weights`]). Source: not measured; set with the relative weighting, low enough that the
+/// off-resonance band of an entry keeps its own relative accuracy.
+const REL_FLOOR_MEDIAN: f64 = 0.05;
+
+/// The magnitude floor of a relative weight, as a share of the entry's peak magnitude
+/// ([`weights`]): a true transmission zero is weighted as at most this far below the peak, not
+/// as noise to be fitted exactly. Source: not measured; set with the relative weighting.
+const REL_FLOOR_PEAK: f64 = 1e-6;
+
+pub(crate) fn weights(data: &[Vec<C>], relative: bool) -> Vec<Vec<f64>> {
+    let nf = data[0].len();
+    if !relative {
+        return vec![vec![1.0; nf]; data.len()];
+    }
+    let floor: Vec<f64> = (0..nf)
+        .map(|e| {
+            let mut mags: Vec<f64> = data.iter().map(|row| row[e].norm()).collect();
+            mags.sort_by(f64::total_cmp);
+            let (med, peak) = (mags[mags.len() / 2], mags[mags.len() - 1]);
+            (REL_FLOOR_MEDIAN * med)
+                .max(REL_FLOOR_PEAK * peak)
+                .max(f64::MIN_POSITIVE)
+        })
+        .collect();
+    data.iter()
+        .map(|row| (0..nf).map(|e| 1.0 / row[e].norm().max(floor[e])).collect())
+        .collect()
+}
+
+/// What a fit holds besides its poles, how it weighs the samples, where it starts and how it
+/// searches the order ([`fit_auto_opts`]).
+#[derive(Clone, Debug)]
+pub struct Options {
+    /// The proportional term `s·h` per entry: an admittance or impedance grows with frequency
+    /// (a capacitance, an inductance); a bounded response (scattering parameters) has none.
+    pub proportional: bool,
+    /// The √s skin-effect branch term per entry ([`fit_auto_with`]).
+    pub sqrt: bool,
+    /// Relative weights, `tol` a relative error; off, absolute ones ([`weights`]).
+    pub relative: bool,
+    /// Per-entry delays on the normalised axis (empty: none): entry `e` is modelled as
+    /// `exp(-s·delays[e])` times a rational function, so a propagation delay costs no poles. The
+    /// fit takes the delays out of the samples, fits the rational parts and puts the delays back
+    /// into the model ([`VfModel::eval`]); [`crate::phase_slope`] estimates them from the samples.
+    pub delays: Vec<f64>,
+    /// The poles to start from, as [`VfModel::poles`] lists them (the real ones, then each c.c.
+    /// pair as the pole with `Im > 0` and its conjugate): a refit after a few more samples starts
+    /// from the poles of the fit before. Empty, or more than the order may take: one c.c. pair
+    /// and one real pole spread over the band.
+    pub start: Vec<C>,
+    /// Skim threshold: a pole whose band energy is below this share of the mean pole energy in
+    /// every entry is spurious (the scikit-rf default).
+    pub skim: f64,
+    /// A skim is kept where the rms error grows by no more than this factor (else the pole
+    /// was load-bearing and comes back).
+    pub skim_slack: f64,
+    /// Relocation steps per order.
+    pub relocations: usize,
+    /// Pairs added in a row without lowering the rms error before the order is final.
+    pub patience: usize,
+    /// The smallest magnitude of the relaxation constant `d`: below it `d` is fixed at this
+    /// magnitude (its sign kept) and σ solved again without the relaxation row (Gustavsen).
+    pub relax_floor: f64,
+    /// `tol` bounds the largest weighted error over the samples and entries instead of the rms,
+    /// and the order grows while that falls: a response of many entries whose tolerance holds
+    /// for every entry, where a few entries off by more than it hardly move the rms.
+    pub max_error: bool,
+}
+
+impl Default for Options {
+    /// The admittance fit: the proportional term, no √s term, relative weights, no delays, the
+    /// spread start, and the order search of [`fit_auto`].
+    fn default() -> Self {
+        Options {
+            proportional: true,
+            sqrt: false,
+            relative: true,
+            delays: Vec::new(),
+            start: Vec::new(),
+            skim: 0.03,
+            skim_slack: 1.05,
+            relocations: 8,
+            patience: 3,
+            relax_floor: 1e-12,
+            max_error: false,
+        }
+    }
+}
+
 struct Vf<'a> {
     s: &'a [C],         // jω samples (normalised)
     data: &'a [Vec<C>], // [sample][entry]
     nf: usize,
-    // Inverse-magnitude (relative) LS weights wt[sample][entry] = 1/max(|data|, floor_e). A matrix
-    // response spans a huge magnitude range across entries (a spiral's off-diagonal Y is ~1000× its
-    // diagonal); plain absolute least-squares fits the large entries and leaves the small ones at
-    // ~10% relative error — invisible to an absolute residual, so the order growth stops too early.
-    // Weighting every equation by 1/|data| makes each entry fit to its OWN relative accuracy and the
-    // convergence metric track relative error. Floor_e = 1e-4·max_k|data[·][e]| bounds the weight so
-    // a genuine in-band null (resonance zero) can't blow up the system.
+    // the LS weights wt[sample][entry] ([`weights`]); all one where `uniform`
     wt: Vec<Vec<f64>>,
+    uniform: bool,
+    // the entries the rms error is averaged over (`nf`, or the entries a compressed response
+    // stands for)
+    norm_entries: usize,
+    relax_floor: f64,
     fit_const: bool,
     fit_diff: bool,
     fit_sqrt: bool,
@@ -85,38 +197,18 @@ struct Vf<'a> {
 }
 
 impl<'a> Vf<'a> {
-    /// New workspace over samples `s` / response `data` seeded with the given initial poles.
-    fn new(s: &'a [C], data: &'a [Vec<C>], pc: Vec<C>, pr: Vec<f64>) -> Self {
+    /// New workspace over samples `s` / response `data` seeded with the given initial poles,
+    /// weighted relatively per entry (`relative`) or absolutely ([`weights`]).
+    fn new(s: &'a [C], data: &'a [Vec<C>], pc: Vec<C>, pr: Vec<f64>, relative: bool) -> Self {
         let nf = data[0].len();
-        // Per-entry magnitude floor and inverse-magnitude weights (relative fitting).
-        let mut emax = vec![0.0f64; nf];
-        for row in data {
-            for e in 0..nf {
-                emax[e] = emax[e].max(row[e].norm());
-            }
-        }
-        // Per-entry floor anchored at the MEDIAN magnitude, not the band peak: a sharp
-        // resonance peak would otherwise raise the floor so far that every off-peak
-        // sample of the entry is under-weighted — the fit then reports convergence
-        // while the off-peak band (where L/Q curves live) is wrong. The small peak
-        // term keeps true transmission zeros from being weighted as noise.
-        let floor: Vec<f64> = (0..nf)
-            .map(|e| {
-                let mut mags: Vec<f64> = data.iter().map(|row| row[e].norm()).collect();
-                mags.sort_by(f64::total_cmp);
-                let med = mags[mags.len() / 2];
-                (0.05 * med).max(1e-6 * emax[e]).max(1e-300)
-            })
-            .collect();
-        let wt: Vec<Vec<f64>> = data
-            .iter()
-            .map(|row| (0..nf).map(|e| 1.0 / row[e].norm().max(floor[e])).collect())
-            .collect();
         Vf {
             s,
             data,
             nf,
-            wt,
+            wt: weights(data, relative),
+            uniform: !relative,
+            norm_entries: nf,
+            relax_floor: Options::default().relax_floor,
             fit_const: true,
             fit_diff: true,
             fit_sqrt: false,
@@ -145,9 +237,6 @@ impl<'a> Vf<'a> {
         self.pr.len() + 2 * self.pc.len()
     }
 
-    /// Relaxed σ identification: solve for the σ residues and the relaxation constant `d_relax`
-    /// jointly over ALL entries (common poles), with a normalisation row that forbids the
-    /// trivial σ≡0. The per-entry F residues are nuisance unknowns here (refit later).
     /// Cache the partial fractions for all samples into the reused scratch buffers.
     fn cache_x(&mut self) {
         let (n, nrf, nrs) = (self.s.len(), self.nrf(), self.nrs());
@@ -171,6 +260,11 @@ impl<'a> Vf<'a> {
         }
     }
 
+    /// Relaxed σ identification: solve for the σ residues and the relaxation constant `d_relax`
+    /// jointly over ALL entries (common poles), with a normalisation row that forbids the
+    /// trivial σ≡0. The per-entry F residues are nuisance unknowns here (refit later). Where
+    /// `|d_relax|` comes out below the floor, it is fixed there (its sign kept) and σ is solved
+    /// again without the normalisation row, the `d` column on the right-hand side (Gustavsen).
     fn compute_sigma(&mut self) {
         let (n, nf) = (self.s.len(), self.nf);
         let (nrf, nrs) = (self.nrf(), self.nrs());
@@ -248,16 +342,25 @@ impl<'a> Vf<'a> {
                 0.0
             }
         });
-        let x = rr.col_piv_qr().solve_lstsq(&rhs);
+        let mut x = rr.col_piv_qr().solve_lstsq(&rhs);
+        let mut d = x[(nrs, 0)];
+        if d.abs() < self.relax_floor && nrs > 0 {
+            d = if d < 0.0 {
+                -self.relax_floor
+            } else {
+                self.relax_floor
+            };
+            let m = nf * rblk;
+            let a = Mat::<f64>::from_fn(m, nrs, |r, c| rr[(r, c)]);
+            let b = Mat::<f64>::from_fn(m, 1, |r, _| -rr[(r, nrs)] * d);
+            x = a.col_piv_qr().solve_lstsq(&b);
+        }
         let (npr, npc) = (self.pr.len(), self.pc.len());
         self.sr = (0..npr).map(|i| x[(i, 0)]).collect();
         self.sc = (0..npc)
             .map(|i| C::new(x[(npr + i, 0)], x[(npr + npc + i, 0)]))
             .collect();
-        self.d_relax = x[(nrs, 0)];
-        if self.d_relax.abs() < 1e-12 {
-            self.d_relax = 1.0;
-        }
+        self.d_relax = d;
     }
 
     /// New poles = zeros of σ: eigenvalues of `A − b·rᵀ/d_relax` (real block form), split into
@@ -329,8 +432,10 @@ impl<'a> Vf<'a> {
         }
     }
 
-    /// Fit the F residues (and const/diff) per entry, given the current poles. The basis matrix
-    /// is the SAME for every entry, so factor it ONCE and re-solve per entry's RHS.
+    /// Fit the F residues (and const/diff) per entry, given the current poles. With absolute
+    /// weights the basis matrix is the SAME for every entry: factored once, every entry a column
+    /// of one right-hand side. With relative weights each entry has its own rows, factored per
+    /// entry.
     fn compute_residues(&mut self) {
         let (nrf, ncd, n) = (self.nrf(), self.ncd(), self.s.len());
         let (nr, nc) = (self.pr.len(), self.pc.len());
@@ -341,61 +446,72 @@ impl<'a> Vf<'a> {
         let xf = &self.xf;
         let (data, wt) = (self.data, &self.wt);
         let (fit_const, fit_diff, fit_sqrt) = (self.fit_const, self.fit_diff, self.fit_sqrt);
-        // Relative weighting makes the basis entry-dependent (each row scaled by
-        // 1/|data[k][e]|), so factor per entry — independent solves, parallel over
-        // the entries (nf = p² on a multiport), collected in entry order
-        // (bit-identical to serial).
-        type EntryFit = (C, C, C, Vec<C>, Vec<C>);
-        let fits: Vec<EntryFit> = (0..self.nf)
-            .into_par_iter()
-            .map(|e| {
-                let mat = Mat::<f64>::from_fn(2 * n, nrf, |r, c| {
-                    let imag = r >= n;
-                    let k = if imag { r - n } else { r };
-                    let v = xf[k * nrf + c];
-                    (if imag { v.im } else { v.re }) * wt[k][e]
-                });
-                let qr = mat.col_piv_qr();
-                let rhs = Mat::<f64>::from_fn(2 * n, 1, |r, _| {
-                    let imag = r >= n;
-                    let k = if imag { r - n } else { r };
-                    let d = data[k][e];
-                    (if imag { d.im } else { d.re }) * wt[k][e]
-                });
-                let x = qr.solve_lstsq(&rhs);
-                let mut o = 0;
-                let mut cst = C::new(0.0, 0.0);
-                if fit_const {
-                    cst = C::new(x[(o, 0)], 0.0);
-                    o += 1;
-                }
-                let mut dif = C::new(0.0, 0.0);
-                if fit_diff {
-                    dif = C::new(x[(o, 0)], 0.0);
-                    o += 1;
-                }
-                let mut sqt = C::new(0.0, 0.0);
-                if fit_sqrt {
-                    sqt = C::new(x[(o, 0)], 0.0); // last poly slot
-                }
-                let rr: Vec<C> = (0..nr).map(|i| C::new(x[(ncd + i, 0)], 0.0)).collect();
-                let rc: Vec<C> = (0..nc)
-                    .map(|i| C::new(x[(ncd + nr + i, 0)], x[(ncd + nr + nc + i, 0)]))
-                    .collect();
-                (cst, dif, sqt, rr, rc)
+        let basis = |e: usize| {
+            Mat::<f64>::from_fn(2 * n, nrf, |r, c| {
+                let imag = r >= n;
+                let k = if imag { r - n } else { r };
+                let v = xf[k * nrf + c];
+                (if imag { v.im } else { v.re }) * wt[k][e]
             })
-            .collect();
+        };
+        let rhs = |e0: usize, ne: usize| {
+            Mat::<f64>::from_fn(2 * n, ne, |r, c| {
+                let imag = r >= n;
+                let k = if imag { r - n } else { r };
+                let d = data[k][e0 + c];
+                (if imag { d.im } else { d.re }) * wt[k][e0 + c]
+            })
+        };
+        // the solution columns, one per entry, in entry order
+        let x: Vec<Vec<f64>> = if self.uniform {
+            let x = basis(0).col_piv_qr().solve_lstsq(&rhs(0, self.nf));
+            (0..self.nf)
+                .map(|e| (0..nrf).map(|i| x[(i, e)]).collect())
+                .collect()
+        } else {
+            // Relative weighting makes the basis entry-dependent (each row scaled by
+            // 1/|data[k][e]|), so factor per entry — independent solves, parallel over
+            // the entries (nf = p² on a multiport), collected in entry order
+            // (bit-identical to serial).
+            (0..self.nf)
+                .into_par_iter()
+                .map(|e| {
+                    let x = basis(e).col_piv_qr().solve_lstsq(&rhs(e, 1));
+                    (0..nrf).map(|i| x[(i, 0)]).collect()
+                })
+                .collect()
+        };
         self.rr = Vec::with_capacity(self.nf);
         self.rc = Vec::with_capacity(self.nf);
         self.cst = Vec::with_capacity(self.nf);
         self.dif = Vec::with_capacity(self.nf);
         self.sqt = Vec::with_capacity(self.nf);
-        for (cst, dif, sqt, rr, rc) in fits {
+        for x in x {
+            let mut o = 0;
+            let mut cst = C::new(0.0, 0.0);
+            if fit_const {
+                cst = C::new(x[o], 0.0);
+                o += 1;
+            }
+            let mut dif = C::new(0.0, 0.0);
+            if fit_diff {
+                dif = C::new(x[o], 0.0);
+                o += 1;
+            }
+            let mut sqt = C::new(0.0, 0.0);
+            if fit_sqrt {
+                sqt = C::new(x[o], 0.0); // last poly slot
+            }
             self.cst.push(cst);
             self.dif.push(dif);
             self.sqt.push(sqt);
-            self.rr.push(rr);
-            self.rc.push(rc);
+            self.rr
+                .push((0..nr).map(|i| C::new(x[ncd + i], 0.0)).collect());
+            self.rc.push(
+                (0..nc)
+                    .map(|i| C::new(x[ncd + nr + i], x[ncd + nr + nc + i]))
+                    .collect(),
+            );
         }
     }
 
@@ -496,13 +612,15 @@ impl<'a> Vf<'a> {
             cst: self.cst.clone(),
             dif: self.dif.clone(),
             sqt: self.sqt.clone(),
+            delay: vec![0.0; self.nf],
             d: self.nf,
         }
     }
 
-    /// Maximum RELATIVE fit error over all samples/entries — each residual weighted by the same
-    /// inverse-magnitude `wt` the LS uses, so the tolerance the greedy chases is a true relative
-    /// error on every entry (not an absolute one dominated by the largest-magnitude entry).
+    /// Maximum weighted fit error over all samples/entries — each residual weighted by the same
+    /// `wt` the LS uses ([`weights`]), so the tolerance the greedy chases is a true relative
+    /// error on every entry with relative weights (not an absolute one dominated by the
+    /// largest-magnitude entry), an absolute one without.
     fn err_max(&self) -> f64 {
         let m = self.model();
         let mut e = 0.0f64;
@@ -515,10 +633,12 @@ impl<'a> Vf<'a> {
         e
     }
 
-    /// RMS RELATIVE fit error over all samples/entries. Unlike the max, a single pole that nulls
+    /// RMS weighted fit error over all samples/entries. Unlike the max, a single pole that nulls
     /// one anchor's residual barely moves it — so the RMS has a clean elbow at the PHYSICAL pole
     /// count, which is what stops the order growth before it fits noise. Relative weighting keeps
-    /// the elbow honest when the entries span a large magnitude range.
+    /// the elbow honest when the entries span a large magnitude range. Averaged over the entries
+    /// the response has (`norm_entries`): a compressed response is the same sum of squares over
+    /// fewer columns.
     fn err_rms(&self) -> f64 {
         let m = self.model();
         let mut s2 = 0.0f64;
@@ -529,11 +649,11 @@ impl<'a> Vf<'a> {
                 s2 += d * d;
             }
         }
-        (s2 / (self.s.len() * self.nf) as f64).sqrt()
+        (s2 / (self.s.len() * self.norm_entries) as f64).sqrt()
     }
 
-    /// Sample index of the largest (entry-summed) RELATIVE residual — where a new pole should be
-    /// seeded (the worst-fit band in relative terms, matching what the greedy is minimising).
+    /// Sample index of the largest (entry-summed) weighted residual — where a new pole should be
+    /// seeded (the worst-fit band, matching what the greedy is minimising).
     /// `exclude` skips seed locations already tried this growth round, so a retry after a
     /// non-improving addition explores the NEXT-worst band instead of re-seeding the same spot.
     fn worst_sample(&self, exclude: &[usize]) -> usize {
@@ -555,19 +675,128 @@ impl<'a> Vf<'a> {
     }
 }
 
+/// The damping of a starting pole as a share of its frequency: `-a + jb` with `a = b * this`
+/// (Gustavsen and Semlyen 1999, `a = b / 100` for complex starting poles); the real starting
+/// poles and the pairs seeded while the order grows take the same share.
+const START_DAMPING: f64 = 0.01;
+
 /// Even-spread, lightly-damped (left-half-plane) initial poles across the band.
 fn spread_cpx(n: usize, wmax: f64) -> Vec<C> {
     (0..n)
         .map(|i| {
             let w = wmax * (i as f64 + 1.0) / (n as f64 + 1.0);
-            C::new(-w / 100.0, w)
+            C::new(-w * START_DAMPING, w)
         })
         .collect()
 }
 fn spread_real(n: usize, wmax: f64) -> Vec<f64> {
     (0..n)
-        .map(|i| -wmax * (i as f64 + 1.0) / (n as f64 + 1.0) / 50.0)
+        .map(|i| -wmax * (i as f64 + 1.0) / (n as f64 + 1.0) * START_DAMPING)
         .collect()
+}
+
+/// Singular values of the stacked real and imaginary parts of a response (samples x entries)
+/// below this share of the largest are left out of its compression ([`compress`]): round-off,
+/// a few hundred epsilons.
+const COMPRESS_DROP: f64 = 1e-13;
+
+/// The response `data` (samples x entries) as the real combinations of its entries that span
+/// it: the thin SVD of its real and imaginary parts stacked (`[Re; Im] = U Σ Vᵀ`, real V, so
+/// every combination is the response of a real system again), the columns `U Σ` above
+/// [`COMPRESS_DROP`] as complex samples. A least-squares fit with given poles leaves the same
+/// residual (the Frobenius norm over all samples and entries) on these as on `data`: its
+/// residual is `(I − P)·[Re; Im]`, and `[Re; Im] = (U Σ) Vᵀ` with orthonormal `Vᵀ`. At most
+/// `2·samples` columns, however many entries.
+fn compress(data: &[Vec<C>]) -> Vec<Vec<C>> {
+    let (ns, nf) = (data.len(), data[0].len());
+    let a = Mat::<f64>::from_fn(2 * ns, nf, |r, e| {
+        if r < ns {
+            data[r][e].re
+        } else {
+            data[r - ns][e].im
+        }
+    });
+    let Ok(svd) = a.thin_svd() else {
+        return data.to_vec();
+    };
+    let sv: Vec<f64> = svd.S().column_vector().iter().copied().collect();
+    let top = sv.first().copied().unwrap_or(0.0);
+    let q = sv
+        .iter()
+        .filter(|&&x| x > COMPRESS_DROP * top)
+        .count()
+        .max(1);
+    let u = svd.U();
+    (0..ns)
+        .map(|k| {
+            (0..q)
+                .map(|j| C::new(u[(k, j)] * sv[j], u[(ns + k, j)] * sv[j]))
+                .collect()
+        })
+        .collect()
+}
+
+/// The delays of `opts` per entry (zeros where it has none), and the samples with them taken out
+/// (`None` where every delay is zero): `exp(s·τ_e)·data_e`, the rational parts a fit models.
+fn without_delays(s: &[C], data: &[Vec<C>], opts: &Options) -> (Vec<f64>, Option<Vec<Vec<C>>>) {
+    let nf = data[0].len();
+    let delays = if opts.delays.is_empty() {
+        vec![0.0; nf]
+    } else {
+        assert_eq!(opts.delays.len(), nf, "one delay per entry");
+        opts.delays.clone()
+    };
+    let shifted = delays.iter().any(|&t| t != 0.0).then(|| {
+        s.iter()
+            .zip(data)
+            .map(|(&z, row)| {
+                row.iter()
+                    .zip(&delays)
+                    .map(|(v, &t)| v * (z * t).exp())
+                    .collect()
+            })
+            .collect()
+    });
+    (delays, shifted)
+}
+
+/// Poles as [`VfModel::poles`] lists them split into the c.c. pair representatives (`Im > 0`)
+/// and the real poles, every one moved into the left half-plane.
+fn split_poles(poles: &[C]) -> (Vec<C>, Vec<f64>) {
+    (
+        poles
+            .iter()
+            .filter(|p| p.im > 0.0)
+            .map(|p| C::new(-p.re.abs(), p.im))
+            .collect(),
+        poles
+            .iter()
+            .filter(|p| p.im == 0.0)
+            .map(|p| -p.re.abs())
+            .collect(),
+    )
+}
+
+/// The residues, constants and the optional terms of every entry for the given `poles` (as
+/// [`VfModel::poles`] lists them), with the basis, weights and delays of `opts`: one
+/// least-squares solve, no relocation (a refit of a model on other samples, a leave-one-out
+/// model). `None` where the samples do not determine them: two equations a sample, fewer than
+/// the poles, the constant and the optional terms.
+pub fn fit_residues(s: &[C], data: &[Vec<C>], poles: &[C], opts: &Options) -> Option<VfModel> {
+    super::pin_faer_sequential();
+    let (delays, shifted) = without_delays(s, data, opts);
+    let data = shifted.as_deref().unwrap_or(data);
+    let (pc, pr) = split_poles(poles);
+    let mut vf = Vf::new(s, data, pc, pr, opts.relative);
+    vf.fit_diff = opts.proportional;
+    vf.fit_sqrt = opts.sqrt;
+    if 2 * s.len() < vf.nrf() {
+        return None;
+    }
+    vf.compute_residues();
+    let mut m = vf.model();
+    m.delay = delays;
+    Some(m)
 }
 
 /// Fixed-order set-valued fit by relaxed vector fitting. `n_cpx`/`n_real` are the initial pole
@@ -585,7 +814,13 @@ pub fn fit(
 ) -> VfModel {
     super::pin_faer_sequential();
     let wmax = s.iter().map(|z| z.im.abs()).fold(0.0, f64::max).max(1e-12);
-    let mut vf = Vf::new(s, data, spread_cpx(n_cpx, wmax), spread_real(n_real, wmax));
+    let mut vf = Vf::new(
+        s,
+        data,
+        spread_cpx(n_cpx, wmax),
+        spread_real(n_real, wmax),
+        true,
+    );
     vf.compute_residues();
     vf.relocate(tol, max_steps);
     vf.model()
@@ -615,35 +850,108 @@ pub fn fit_auto_with(
     max_poles: usize,
     sqrt_term: bool,
 ) -> VfModel {
+    fit_auto_opts(
+        s,
+        data,
+        tol,
+        max_poles,
+        &Options {
+            sqrt: sqrt_term,
+            ..Options::default()
+        },
+    )
+}
+
+/// [`fit_auto`] with the basis, weights, delays, start and order search of `opts`. The order
+/// never exceeds `max_poles` (counting both members of a c.c. pair), nor what the samples
+/// determine: the spread start is one c.c. pair and one real pole where both fit, fewer where
+/// they do not. With absolute weights and more entries than real equations a sample, the poles
+/// are identified on the compressed response ([`compress`]) and the residues of every entry
+/// fitted with them at the end.
+pub fn fit_auto_opts(
+    s: &[C],
+    data: &[Vec<C>],
+    tol: f64,
+    max_poles: usize,
+    opts: &Options,
+) -> VfModel {
     super::pin_faer_sequential();
-    const GAMMA: f64 = 0.03; // spurious-pole skim threshold (scikit-rf default)
-    const VF_STEPS: usize = 8;
     let ns = s.len();
     let nf = data[0].len();
+    let (delays, shifted) = without_delays(s, data, opts);
+    let data = shifted.as_deref().unwrap_or(data);
+    // the response the poles are identified on
+    let compressed: Option<Vec<Vec<C>>> = (!opts.relative && nf > 2 * ns).then(|| compress(data));
+    let ident: &[Vec<C>] = compressed.as_deref().unwrap_or(data);
+    let nq = ident[0].len();
     let wmax = s.iter().map(|z| z.im.abs()).fold(0.0, f64::max).max(1e-12);
+    // the lowest sample above DC: the start's real pole and the floor of a seeded pair, so a
+    // pole near DC (a port grounded through a stub, `1/(R + sL)` in Y) is in reach
+    let wlo = s
+        .iter()
+        .map(|z| z.im.abs())
+        .filter(|&w| w > 0.0)
+        .fold(wmax, f64::min);
     // Common-pole σ identification is over-determined only for nc ≤ (2·ns·nf − 3nf − 1)/(2(nf+1)).
-    let nc_lim = (2 * ns * nf).saturating_sub(3 * nf + 1) / (2 * (nf + 1));
-    let max_cpx = (max_poles / 2).min(nc_lim).max(1);
+    let nc_lim = (2 * ns * nq).saturating_sub(3 * nq + 1) / (2 * (nq + 1));
+    let max_cpx = (max_poles / 2).min(nc_lim);
+    // The starting order: the given poles where the order may take them, else one c.c. pair
+    // spread over the band and one real pole at the lowest sample, fewer where `max_poles` or the
+    // samples allow fewer (the residue LS of an entry needs as many equations, two a sample, as
+    // unknowns: the poles, the constant and the optional terms).
+    let ncd = 1 + opts.proportional as usize + opts.sqrt as usize;
+    let room = max_poles.min((2 * ns).saturating_sub(ncd));
+    let (pc0, pr0) = if !opts.start.is_empty() && opts.start.len() <= room {
+        split_poles(&opts.start)
+    } else {
+        let (n_cpx0, n_real0) = match room {
+            0 => (0, 0),
+            1 => (0, 1),
+            2 => (1, 0),
+            _ => (1, 1),
+        };
+        (spread_cpx(n_cpx0, wmax), vec![-wlo; n_real0])
+    };
 
-    let mut vf = Vf::new(s, data, spread_cpx(1, wmax), spread_real(1, wmax));
-    vf.fit_sqrt = sqrt_term;
+    // the error the order is grown on: the rms, or the largest error over the response itself
+    // (the residues of every entry fitted with the poles where they were identified on the
+    // compressed response)
+    let score = |vf: &Vf| -> f64 {
+        if !opts.max_error {
+            return vf.err_rms();
+        }
+        if compressed.is_none() {
+            return vf.err_max();
+        }
+        let mut full = Vf::new(s, data, vf.pc.clone(), vf.pr.clone(), opts.relative);
+        full.fit_diff = opts.proportional;
+        full.fit_sqrt = opts.sqrt;
+        full.compute_residues();
+        full.err_max()
+    };
+    let mut vf = Vf::new(s, ident, pc0, pr0, opts.relative);
+    vf.norm_entries = nf;
+    vf.relax_floor = opts.relax_floor;
+    vf.fit_diff = opts.proportional;
+    vf.fit_sqrt = opts.sqrt;
     vf.compute_residues();
-    vf.relocate(tol, VF_STEPS);
+    vf.relocate(tol, opts.relocations);
     // Initial skim, guarded like the in-loop one (see below).
-    let pre0 = vf.err_rms();
+    let pre0 = score(&vf);
     let (pr0, pc0) = (vf.pr.clone(), vf.pc.clone());
-    if vf.skim_spurious(GAMMA) {
+    if vf.skim_spurious(opts.skim) {
         vf.compute_residues();
-        if vf.err_rms() > pre0 * 1.05 {
+        if score(&vf) > pre0 * opts.skim_slack {
             vf.pr = pr0;
             vf.pc = pc0;
             vf.compute_residues();
         }
     }
     let mut best = vf.model();
-    let mut best_err = vf.err_rms();
+    let mut best_poles = (vf.pr.clone(), vf.pc.clone());
+    let mut best_err = score(&vf);
     crate::vflog!(
-        "[vf] start: {ns} samples x {nf} entries, cpx={} real={} rms={:.2e} (tol={tol:.0e}, max_cpx={max_cpx})",
+        "[vf] start: {ns} samples x {nf} entries ({nq} identified), cpx={} real={} err={:.2e} (tol={tol:.0e}, max_cpx={max_cpx})",
         vf.pc.len(),
         vf.pr.len(),
         best_err
@@ -652,12 +960,15 @@ pub fn fit_auto_with(
     // Growth patience: a single non-improving addition is NOT proof the order is
     // exhausted — multi-resonance data routinely plateaus while growing through an
     // intermediate order (the added pair lands on one resonance, the RMS is still
-    // dominated by the next unseen one). Allow up to PATIENCE consecutive misses,
+    // dominated by the next unseen one). Allow up to `patience` consecutive misses,
     // seeding each retry at the next-worst band, before declaring parsimony.
-    const PATIENCE: usize = 3;
     let mut tried: Vec<usize> = Vec::new();
     let mut misses = 0usize;
-    while vf.pc.len() < max_cpx && best_err >= tol && misses < PATIENCE {
+    while vf.pc.len() < max_cpx
+        && vf.pr.len() + 2 * (vf.pc.len() + 1) <= max_poles
+        && best_err >= tol
+        && misses < opts.patience
+    {
         // A further c.c. pair must keep BOTH least-squares stages over-determined
         // (per-entry F residues: 2·ns > nrf; σ additionally needs its shared block) —
         // otherwise compute_residues/compute_sigma bail and the model cannot improve.
@@ -670,10 +981,10 @@ pub fn fit_auto_with(
         // this round) and re-relocate the whole set.
         let k = vf.worst_sample(&tried);
         tried.push(k);
-        let w = s[k].im.abs().max(wmax * 1e-3);
-        vf.pc.push(C::new(-w / 100.0, w));
+        let w = s[k].im.abs().max(wlo);
+        vf.pc.push(C::new(-w * START_DAMPING, w));
         vf.compute_residues();
-        vf.relocate(tol, VF_STEPS);
+        vf.relocate(tol, opts.relocations);
         // Guarded skim: the energy criterion compares against the MEAN pole energy,
         // which resonance-dominated responses inflate — a freshly seeded pair then
         // reads as "spurious" before it can specialise, and the order can never grow
@@ -682,48 +993,60 @@ pub fn fit_auto_with(
         // removing it leaves the RMS unchanged — accept a skim only on that evidence,
         // and roll it back when the RMS degrades (the pole was load-bearing).
         let n_before = vf.pr.len() + vf.pc.len();
-        let pre_rms = vf.err_rms();
+        let pre_err = score(&vf);
         let (pr_bak, pc_bak) = (vf.pr.clone(), vf.pc.clone());
-        if vf.skim_spurious(GAMMA) {
+        if vf.skim_spurious(opts.skim) {
             vf.compute_residues();
-            let post_rms = vf.err_rms();
+            let post_err = score(&vf);
             let n_after = vf.pr.len() + vf.pc.len();
-            if post_rms > pre_rms * 1.05 {
+            if post_err > pre_err * opts.skim_slack {
                 vf.pr = pr_bak;
                 vf.pc = pc_bak;
                 vf.compute_residues();
                 crate::vflog!(
-                    "[vf]   skim rejected ({n_before} -> {n_after} poles would cost rms {pre_rms:.2e} -> {post_rms:.2e})"
+                    "[vf]   skim rejected ({n_before} -> {n_after} poles would cost err {pre_err:.2e} -> {post_err:.2e})"
                 );
             } else {
                 crate::vflog!(
-                    "[vf]   skim: {} -> {} poles (rms {pre_rms:.2e} -> {post_rms:.2e})",
+                    "[vf]   skim: {} -> {} poles (err {pre_err:.2e} -> {post_err:.2e})",
                     n_before,
                     vf.pr.len() + vf.pc.len()
                 );
             }
         }
-        let e = vf.err_rms();
+        let e = score(&vf);
         if e < best_err {
             crate::vflog!(
-                "[vf]   +pair@w={w:.3}: cpx={} real={} rms={e:.2e} (improved)",
+                "[vf]   +pair@w={w:.3}: cpx={} real={} err={e:.2e} (improved)",
                 vf.pc.len(),
                 vf.pr.len()
             );
             best = vf.model();
+            best_poles = (vf.pr.clone(), vf.pc.clone());
             best_err = e;
             misses = 0;
             tried.clear();
         } else {
             misses += 1;
             crate::vflog!(
-                "[vf]   +pair@w={w:.3}: cpx={} real={} rms={e:.2e} (miss {misses}/{PATIENCE}, best {best_err:.2e})",
+                "[vf]   +pair@w={w:.3}: cpx={} real={} err={e:.2e} (miss {misses}/{}, best {best_err:.2e})",
                 vf.pc.len(),
-                vf.pr.len()
+                vf.pr.len(),
+                opts.patience
             );
         }
     }
-    crate::vflog!("[vf] done: {} poles, rms={best_err:.2e}", best.poles.len());
+    if compressed.is_some() {
+        // the residues of every entry with the poles identified on the compressed response
+        let (pr, pc) = best_poles;
+        let mut full = Vf::new(s, data, pc, pr, opts.relative);
+        full.fit_diff = opts.proportional;
+        full.fit_sqrt = opts.sqrt;
+        full.compute_residues();
+        best = full.model();
+    }
+    crate::vflog!("[vf] done: {} poles, err={best_err:.2e}", best.poles.len());
+    best.delay = delays;
     best
 }
 
@@ -778,6 +1101,56 @@ mod par_tests {
         assert_eq!(a.res, b.res);
         assert_eq!(a.cst, b.cst);
         assert_eq!(a.dif, b.dif);
+    }
+
+    /// The many-port compression: a response of more entries than real equations a sample
+    /// (absolute weights) is fitted on its compressed form to the accuracy of the full fit, and
+    /// a warm start from the poles of that fit keeps that accuracy with no more poles.
+    #[test]
+    fn a_compressed_many_port_fit_matches_and_restarts() {
+        let (s, data) = synth(30, 100, 4);
+        let opts = Options {
+            relative: false,
+            ..Options::default()
+        };
+        let m = fit_auto_opts(&s, &data, 1e-9, 20, &opts);
+        let err = s
+            .iter()
+            .zip(&data)
+            .flat_map(|(&z, row)| {
+                let got = m.eval(z);
+                row.iter()
+                    .zip(got)
+                    .map(|(a, b)| (a - b).norm())
+                    .collect::<Vec<_>>()
+            })
+            .fold(0.0, f64::max);
+        assert!(err < 1e-6, "compressed fit error {err:e}");
+        let again = fit_auto_opts(
+            &s,
+            &data,
+            1e-9,
+            20,
+            &Options {
+                start: m.poles().to_vec(),
+                ..opts
+            },
+        );
+        assert!(
+            again.order() <= m.order(),
+            "{} after {}",
+            again.order(),
+            m.order()
+        );
+        for (&z, row) in s.iter().zip(&data) {
+            for (a, b) in row.iter().zip(again.eval(z)) {
+                assert!(
+                    (a - b).norm() < 1e-6,
+                    "warm-started fit error {}",
+                    (a - b).norm()
+                );
+            }
+        }
     }
 
     /// Timing probe for the multiport fit (release gate; run explicitly):
