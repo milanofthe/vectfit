@@ -127,6 +127,10 @@ pub struct Options {
     /// The smallest magnitude of the relaxation constant `d`: below it `d` is fixed at this
     /// magnitude (its sign kept) and σ solved again without the relaxation row (Gustavsen).
     pub relax_floor: f64,
+    /// `tol` bounds the largest weighted error over the samples and entries instead of the rms,
+    /// and the order grows while that falls: a response of many entries whose tolerance holds
+    /// for every entry, where a few entries off by more than it hardly move the rms.
+    pub max_error: bool,
 }
 
 impl Default for Options {
@@ -144,6 +148,7 @@ impl Default for Options {
             relocations: 8,
             patience: 3,
             relax_floor: 1e-12,
+            max_error: false,
         }
     }
 }
@@ -891,6 +896,22 @@ pub fn fit_auto_opts(
         (spread_cpx(n_cpx0, wmax), vec![-wlo; n_real0])
     };
 
+    // the error the order is grown on: the rms, or the largest error over the response itself
+    // (the residues of every entry fitted with the poles where they were identified on the
+    // compressed response)
+    let score = |vf: &Vf| -> f64 {
+        if !opts.max_error {
+            return vf.err_rms();
+        }
+        if compressed.is_none() {
+            return vf.err_max();
+        }
+        let mut full = Vf::new(s, data, vf.pc.clone(), vf.pr.clone(), opts.relative);
+        full.fit_diff = opts.proportional;
+        full.fit_sqrt = opts.sqrt;
+        full.compute_residues();
+        full.err_max()
+    };
     let mut vf = Vf::new(s, ident, pc0, pr0, opts.relative);
     vf.norm_entries = nf;
     vf.relax_floor = opts.relax_floor;
@@ -899,11 +920,11 @@ pub fn fit_auto_opts(
     vf.compute_residues();
     vf.relocate(tol, opts.relocations);
     // Initial skim, guarded like the in-loop one (see below).
-    let pre0 = vf.err_rms();
+    let pre0 = score(&vf);
     let (pr0, pc0) = (vf.pr.clone(), vf.pc.clone());
     if vf.skim_spurious(opts.skim) {
         vf.compute_residues();
-        if vf.err_rms() > pre0 * opts.skim_slack {
+        if score(&vf) > pre0 * opts.skim_slack {
             vf.pr = pr0;
             vf.pc = pc0;
             vf.compute_residues();
@@ -911,9 +932,9 @@ pub fn fit_auto_opts(
     }
     let mut best = vf.model();
     let mut best_poles = (vf.pr.clone(), vf.pc.clone());
-    let mut best_err = vf.err_rms();
+    let mut best_err = score(&vf);
     crate::vflog!(
-        "[vf] start: {ns} samples x {nf} entries ({nq} identified), cpx={} real={} rms={:.2e} (tol={tol:.0e}, max_cpx={max_cpx})",
+        "[vf] start: {ns} samples x {nf} entries ({nq} identified), cpx={} real={} err={:.2e} (tol={tol:.0e}, max_cpx={max_cpx})",
         vf.pc.len(),
         vf.pr.len(),
         best_err
@@ -955,31 +976,31 @@ pub fn fit_auto_opts(
         // removing it leaves the RMS unchanged — accept a skim only on that evidence,
         // and roll it back when the RMS degrades (the pole was load-bearing).
         let n_before = vf.pr.len() + vf.pc.len();
-        let pre_rms = vf.err_rms();
+        let pre_err = score(&vf);
         let (pr_bak, pc_bak) = (vf.pr.clone(), vf.pc.clone());
         if vf.skim_spurious(opts.skim) {
             vf.compute_residues();
-            let post_rms = vf.err_rms();
+            let post_err = score(&vf);
             let n_after = vf.pr.len() + vf.pc.len();
-            if post_rms > pre_rms * opts.skim_slack {
+            if post_err > pre_err * opts.skim_slack {
                 vf.pr = pr_bak;
                 vf.pc = pc_bak;
                 vf.compute_residues();
                 crate::vflog!(
-                    "[vf]   skim rejected ({n_before} -> {n_after} poles would cost rms {pre_rms:.2e} -> {post_rms:.2e})"
+                    "[vf]   skim rejected ({n_before} -> {n_after} poles would cost err {pre_err:.2e} -> {post_err:.2e})"
                 );
             } else {
                 crate::vflog!(
-                    "[vf]   skim: {} -> {} poles (rms {pre_rms:.2e} -> {post_rms:.2e})",
+                    "[vf]   skim: {} -> {} poles (err {pre_err:.2e} -> {post_err:.2e})",
                     n_before,
                     vf.pr.len() + vf.pc.len()
                 );
             }
         }
-        let e = vf.err_rms();
+        let e = score(&vf);
         if e < best_err {
             crate::vflog!(
-                "[vf]   +pair@w={w:.3}: cpx={} real={} rms={e:.2e} (improved)",
+                "[vf]   +pair@w={w:.3}: cpx={} real={} err={e:.2e} (improved)",
                 vf.pc.len(),
                 vf.pr.len()
             );
@@ -991,7 +1012,7 @@ pub fn fit_auto_opts(
         } else {
             misses += 1;
             crate::vflog!(
-                "[vf]   +pair@w={w:.3}: cpx={} real={} rms={e:.2e} (miss {misses}/{}, best {best_err:.2e})",
+                "[vf]   +pair@w={w:.3}: cpx={} real={} err={e:.2e} (miss {misses}/{}, best {best_err:.2e})",
                 vf.pc.len(),
                 vf.pr.len(),
                 opts.patience
@@ -1007,7 +1028,7 @@ pub fn fit_auto_opts(
         full.compute_residues();
         best = full.model();
     }
-    crate::vflog!("[vf] done: {} poles, rms={best_err:.2e}", best.poles.len());
+    crate::vflog!("[vf] done: {} poles, err={best_err:.2e}", best.poles.len());
     best.delay = delays;
     best
 }
