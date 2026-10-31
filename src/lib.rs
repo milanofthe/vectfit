@@ -55,7 +55,7 @@ mod model;
 pub mod passivity;
 pub mod ratmodel;
 
-pub use delay::phase_slope;
+pub use delay::{phase_slope, phase_turns};
 pub use engine::fit as fit_order;
 pub use engine::{fit_auto, fit_auto_opts, fit_auto_with, fit_residues, Options}; // production entry points; return `model::VfModel`
 pub use model::VfModel;
