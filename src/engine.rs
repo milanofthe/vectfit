@@ -898,7 +898,14 @@ pub fn fit_auto_opts(
     // The starting order: the given poles where the order may take them, else one c.c. pair
     // spread over the band and one real pole at the lowest sample, fewer where `max_poles` or the
     // samples allow fewer (the residue LS of an entry needs as many equations, two a sample, as
-    // unknowns: the poles, the constant and the optional terms).
+    // unknowns: the poles, the constant and the optional terms). A spread start takes at least a
+    // pair for every turn of the phase over the samples ([`phase_turns`]): fewer fit no response
+    // that turns that often, and grown one pair at a time from fewer, no single pair lowers the
+    // error of a model that explains nothing yet, so the growth stops on that plateau (a patch
+    // array's feed, nine turns over its band, stopped at three poles). Given poles are kept as
+    // they are: they come from a fit of the response, and a pair added to them unsettles a pole
+    // set that already meets it (a filter's model then alternated between two sets of its order
+    // from fit to fit); a plateau they start on is left by the doubling below.
     let ncd = 1 + opts.proportional as usize + opts.sqrt as usize;
     let room = max_poles.min((2 * ns).saturating_sub(ncd));
     let (pc0, pr0) = if !opts.start.is_empty() && opts.start.len() <= room {
@@ -910,7 +917,13 @@ pub fn fit_auto_opts(
             2 => (1, 0),
             _ => (1, 1),
         };
-        (spread_cpx(n_cpx0, wmax), vec![-wlo; n_real0])
+        let n_turns = crate::delay::phase_turns(s, data).ceil() as usize;
+        let n_cpx = n_cpx0
+            .max(n_turns)
+            .min(max_cpx)
+            .min(room.saturating_sub(n_real0) / 2)
+            .max(n_cpx0);
+        (spread_cpx(n_cpx, wmax), vec![-wlo; n_real0])
     };
 
     // the error the order is grown on: the rms, or the largest error over the response itself
@@ -929,24 +942,29 @@ pub fn fit_auto_opts(
         full.compute_residues();
         full.err_max()
     };
-    let mut vf = Vf::new(s, ident, pc0, pr0, opts.relative);
-    vf.norm_entries = nf;
-    vf.relax_floor = opts.relax_floor;
-    vf.fit_diff = opts.proportional;
-    vf.fit_sqrt = opts.sqrt;
-    vf.compute_residues();
-    vf.relocate(tol, opts.relocations);
-    // Initial skim, guarded like the in-loop one (see below).
-    let pre0 = score(&vf);
-    let (pr0, pc0) = (vf.pr.clone(), vf.pc.clone());
-    if vf.skim_spurious(opts.skim) {
+    // a fit from the poles `pc`, `pr`: relocated, then skimmed, guarded like the skim in the
+    // growth (see there)
+    let start_at = |pc: Vec<C>, pr: Vec<f64>| -> Vf {
+        let mut vf = Vf::new(s, ident, pc, pr, opts.relative);
+        vf.norm_entries = nf;
+        vf.relax_floor = opts.relax_floor;
+        vf.fit_diff = opts.proportional;
+        vf.fit_sqrt = opts.sqrt;
         vf.compute_residues();
-        if score(&vf) > pre0 * opts.skim_slack {
-            vf.pr = pr0;
-            vf.pc = pc0;
+        vf.relocate(tol, opts.relocations);
+        let pre = score(&vf);
+        let (pr0, pc0) = (vf.pr.clone(), vf.pc.clone());
+        if vf.skim_spurious(opts.skim) {
             vf.compute_residues();
+            if score(&vf) > pre * opts.skim_slack {
+                vf.pr = pr0;
+                vf.pc = pc0;
+                vf.compute_residues();
+            }
         }
-    }
+        vf
+    };
+    let mut vf = start_at(pc0, pr0);
     let mut best = vf.model();
     let mut best_poles = (vf.pr.clone(), vf.pc.clone());
     let mut best_err = score(&vf);
@@ -964,77 +982,103 @@ pub fn fit_auto_opts(
     // seeding each retry at the next-worst band, before declaring parsimony.
     let mut tried: Vec<usize> = Vec::new();
     let mut misses = 0usize;
-    while vf.pc.len() < max_cpx
-        && vf.pr.len() + 2 * (vf.pc.len() + 1) <= max_poles
-        && best_err >= tol
-        && misses < opts.patience
-    {
-        // A further c.c. pair must keep BOTH least-squares stages over-determined
-        // (per-entry F residues: 2·ns > nrf; σ additionally needs its shared block) —
-        // otherwise compute_residues/compute_sigma bail and the model cannot improve.
-        // nr can grow during relocation (c.c. pairs splitting into real poles), so this
-        // is checked per iteration, not folded into max_cpx up front.
-        if 2 * ns <= vf.nrf() + 2 {
-            break;
-        }
-        // Seed a new c.c. pair at the worst-error band (skipping spots already tried
-        // this round) and re-relocate the whole set.
-        let k = vf.worst_sample(&tried);
-        tried.push(k);
-        let w = s[k].im.abs().max(wlo);
-        vf.pc.push(C::new(-w * START_DAMPING, w));
-        vf.compute_residues();
-        vf.relocate(tol, opts.relocations);
-        // Guarded skim: the energy criterion compares against the MEAN pole energy,
-        // which resonance-dominated responses inflate — a freshly seeded pair then
-        // reads as "spurious" before it can specialise, and the order can never grow
-        // (measured: every added pair was skimmed right back, three misses, stall at
-        // 7 poles / rms 1.5e-2). A genuinely spurious pole contributes nothing, so
-        // removing it leaves the RMS unchanged — accept a skim only on that evidence,
-        // and roll it back when the RMS degrades (the pole was load-bearing).
-        let n_before = vf.pr.len() + vf.pc.len();
-        let pre_err = score(&vf);
-        let (pr_bak, pc_bak) = (vf.pr.clone(), vf.pc.clone());
-        if vf.skim_spurious(opts.skim) {
+    loop {
+        while vf.pc.len() < max_cpx
+            && vf.pr.len() + 2 * (vf.pc.len() + 1) <= max_poles
+            && best_err >= tol
+            && misses < opts.patience
+        {
+            // A further c.c. pair must keep BOTH least-squares stages over-determined
+            // (per-entry F residues: 2·ns > nrf; σ additionally needs its shared block) —
+            // otherwise compute_residues/compute_sigma bail and the model cannot improve.
+            // nr can grow during relocation (c.c. pairs splitting into real poles), so this
+            // is checked per iteration, not folded into max_cpx up front.
+            if 2 * ns <= vf.nrf() + 2 {
+                break;
+            }
+            // Seed a new c.c. pair at the worst-error band (skipping spots already tried
+            // this round) and re-relocate the whole set.
+            let k = vf.worst_sample(&tried);
+            tried.push(k);
+            let w = s[k].im.abs().max(wlo);
+            vf.pc.push(C::new(-w * START_DAMPING, w));
             vf.compute_residues();
-            let post_err = score(&vf);
-            let n_after = vf.pr.len() + vf.pc.len();
-            if post_err > pre_err * opts.skim_slack {
-                vf.pr = pr_bak;
-                vf.pc = pc_bak;
+            vf.relocate(tol, opts.relocations);
+            // Guarded skim: the energy criterion compares against the MEAN pole energy,
+            // which resonance-dominated responses inflate — a freshly seeded pair then
+            // reads as "spurious" before it can specialise, and the order can never grow
+            // (measured: every added pair was skimmed right back, three misses, stall at
+            // 7 poles / rms 1.5e-2). A genuinely spurious pole contributes nothing, so
+            // removing it leaves the RMS unchanged — accept a skim only on that evidence,
+            // and roll it back when the RMS degrades (the pole was load-bearing).
+            let n_before = vf.pr.len() + vf.pc.len();
+            let pre_err = score(&vf);
+            let (pr_bak, pc_bak) = (vf.pr.clone(), vf.pc.clone());
+            if vf.skim_spurious(opts.skim) {
                 vf.compute_residues();
-                crate::vflog!(
+                let post_err = score(&vf);
+                let n_after = vf.pr.len() + vf.pc.len();
+                if post_err > pre_err * opts.skim_slack {
+                    vf.pr = pr_bak;
+                    vf.pc = pc_bak;
+                    vf.compute_residues();
+                    crate::vflog!(
                     "[vf]   skim rejected ({n_before} -> {n_after} poles would cost err {pre_err:.2e} -> {post_err:.2e})"
                 );
-            } else {
-                crate::vflog!(
-                    "[vf]   skim: {} -> {} poles (err {pre_err:.2e} -> {post_err:.2e})",
-                    n_before,
-                    vf.pr.len() + vf.pc.len()
-                );
+                } else {
+                    crate::vflog!(
+                        "[vf]   skim: {} -> {} poles (err {pre_err:.2e} -> {post_err:.2e})",
+                        n_before,
+                        vf.pr.len() + vf.pc.len()
+                    );
+                }
             }
-        }
-        let e = score(&vf);
-        if e < best_err {
-            crate::vflog!(
-                "[vf]   +pair@w={w:.3}: cpx={} real={} err={e:.2e} (improved)",
-                vf.pc.len(),
-                vf.pr.len()
-            );
-            best = vf.model();
-            best_poles = (vf.pr.clone(), vf.pc.clone());
-            best_err = e;
-            misses = 0;
-            tried.clear();
-        } else {
-            misses += 1;
-            crate::vflog!(
+            let e = score(&vf);
+            if e < best_err {
+                crate::vflog!(
+                    "[vf]   +pair@w={w:.3}: cpx={} real={} err={e:.2e} (improved)",
+                    vf.pc.len(),
+                    vf.pr.len()
+                );
+                best = vf.model();
+                best_poles = (vf.pr.clone(), vf.pc.clone());
+                best_err = e;
+                misses = 0;
+                tried.clear();
+            } else {
+                misses += 1;
+                crate::vflog!(
                 "[vf]   +pair@w={w:.3}: cpx={} real={} err={e:.2e} (miss {misses}/{}, best {best_err:.2e})",
                 vf.pc.len(),
                 vf.pr.len(),
                 opts.patience
             );
+            }
         }
+        // The growth stalled short of the target: a fit at twice the order of the best, its pairs
+        // spread over the band, before the order is declared exhausted. On a plateau where the model
+        // misses by about the response itself no single added pair lowers the error, many at once
+        // can; where they do not either, the best stays.
+        let n2 = 2 * best_poles.1.len().max(1);
+        if best_err < tol || n2 > max_cpx || best_poles.0.len() + 2 * n2 > room {
+            break;
+        }
+        let wide = start_at(spread_cpx(n2, wmax), best_poles.0.clone());
+        let e = score(&wide);
+        crate::vflog!(
+            "[vf]   doubled: cpx={} real={} err={e:.2e} (best {best_err:.2e})",
+            wide.pc.len(),
+            wide.pr.len()
+        );
+        if e >= best_err {
+            break;
+        }
+        best = wide.model();
+        best_poles = (wide.pr.clone(), wide.pc.clone());
+        best_err = e;
+        vf = wide;
+        misses = 0;
+        tried.clear();
     }
     if compressed.is_some() {
         // the residues of every entry with the poles identified on the compressed response
@@ -1106,6 +1150,42 @@ mod par_tests {
     /// The many-port compression: a response of more entries than real equations a sample
     /// (absolute weights) is fitted on its compressed form to the accuracy of the full fit, and
     /// a warm start from the poles of that fit keeps that accuracy with no more poles.
+    /// A response whose phase turns nine times over the band (an all-pass of nine resonances, of
+    /// the kind of a long feed line): grown one pair at a time from one pair, every added pair
+    /// left the error at the size of the response and the growth stopped at three poles; the
+    /// start of a pair a turn fits it exactly.
+    #[test]
+    fn a_response_that_turns_many_times_is_fitted() {
+        let s: Vec<C> = (0..200)
+            .map(|i| C::new(0.0, 0.01 + 3.0 * i as f64 / 199.0))
+            .collect();
+        let poles: Vec<C> = (0..9)
+            .map(|k| C::new(-0.03, 0.2 + 2.6 * k as f64 / 8.0))
+            .collect();
+        let data: Vec<Vec<C>> = s
+            .iter()
+            .map(|&z| {
+                vec![poles.iter().fold(C::new(0.9, 0.0), |a, &p| {
+                    a * (z + p.conj()) * (z + p) / ((z - p) * (z - p.conj()))
+                })]
+            })
+            .collect();
+        assert!(crate::phase_turns(&s, &data) > 8.5);
+        let opts = Options {
+            proportional: false,
+            relative: false,
+            max_error: true,
+            ..Options::default()
+        };
+        let m = fit_auto_opts(&s, &data, 1e-6, 60, &opts);
+        let err = s
+            .iter()
+            .zip(&data)
+            .map(|(&z, row)| (m.eval(z)[0] - row[0]).norm())
+            .fold(0.0, f64::max);
+        assert!(err < 1e-6, "error {err:e} with {} poles", m.order());
+    }
+
     #[test]
     fn a_compressed_many_port_fit_matches_and_restarts() {
         let (s, data) = synth(30, 100, 4);
