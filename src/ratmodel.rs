@@ -149,6 +149,10 @@ impl RationalModel {
             vf.delay.iter().all(|&t| t == 0.0),
             "a fit with delays has no rational admittance form"
         );
+        assert!(
+            vf.real,
+            "a complex fit is not the response of a real system"
+        );
         let k = TAU * fmax_hz; // normalisation constant s_n = s / K
         let p2 = n_ports * n_ports;
         // Split the expanded pole set into real poles and c.c.-pair representatives (Im > 0).
