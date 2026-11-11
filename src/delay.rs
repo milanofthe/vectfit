@@ -7,14 +7,14 @@ use std::f64::consts::TAU;
 
 use super::C;
 
-/// The samples of `s` (on the `jω` axis) in order of frequency.
+/// The samples of `s` (on the `j*omega` axis) in order of frequency.
 fn by_frequency(s: &[C]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..s.len()).collect();
     order.sort_by(|&a, &b| s[a].im.total_cmp(&s[b].im));
     order
 }
 
-/// The entry `e` of `data` at the samples `order` as `(ω, phase, magnitude)`, the phase unwrapped
+/// The entry `e` of `data` at the samples `order` as `(omega, phase, magnitude)`, the phase unwrapped
 /// from sample to sample (taking it to turn by less than half a turn between two neighbouring
 /// samples); the samples where it is zero are left out.
 fn unwrapped(s: &[C], data: &[Vec<C>], order: &[usize], e: usize) -> Vec<(f64, f64, f64)> {
@@ -38,7 +38,7 @@ fn unwrapped(s: &[C], data: &[Vec<C>], order: &[usize], e: usize) -> Vec<(f64, f
 }
 
 /// The largest number of turns the phase of an entry of `data` spans over the samples `s` (on the
-/// `jω` axis), unwrapped as [`phase_slope`] does. A rational function needs at least one c.c. pole
+/// `j*omega` axis), unwrapped as [`phase_slope`] does. A rational function needs at least one c.c. pole
 /// pair a turn: the phase of a pair and its zeros spans at most one turn (the argument principle),
 /// so a response that turns `n` times over the band (a propagation delay, a chain of resonances)
 /// is not fitted by fewer than `n` pairs. On samples too sparse for the phase the count is too
@@ -62,9 +62,9 @@ pub fn phase_turns(s: &[C], data: &[Vec<C>]) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// Per entry of `data` (`data[k][e]` the entry `e` at the sample `s[k]` on the `jω` axis), the
-/// delay `τ_e >= 0` of the straight line through its unwrapped phase over `ω` (least squares,
-/// each sample weighted by its magnitude): `exp(s·τ_e)·data_e` has no linear phase trend left.
+/// Per entry of `data` (`data[k][e]` the entry `e` at the sample `s[k]` on the `j*omega` axis), the
+/// delay `tau_e >= 0` of the straight line through its unwrapped phase over `omega` (least squares,
+/// each sample weighted by its magnitude): `exp(s*tau_e)*data_e` has no linear phase trend left.
 ///
 /// The phase is unwrapped from sample to sample in order of frequency, which takes the phase
 /// between two neighbouring samples to turn by less than half a turn: on samples too sparse for

@@ -1,28 +1,28 @@
-//! The public, physical-domain **rational macromodel** produced by the vector fit — a common
-//! pole set with per-entry residues plus constant `D` and proportional `sE` terms — for a
+//! The public, physical-domain **rational macromodel** produced by the vector fit (a common
+//! pole set with per-entry residues plus constant `D` and proportional `sE` terms) for a
 //! `p`-port admittance response `Y(s)`.
 //!
-//! The engine ([`super::fit_auto`]) fits on a *normalised* imaginary axis `s_n = j·f/fmax` for
+//! The engine ([`super::fit_auto`]) fits on a *normalised* imaginary axis `s_n = j*f/fmax` for
 //! conditioning; this struct stores the **denormalised, physical** model so that
-//! [`RationalModel::eval`] at `s = j·2π·f` reconstructs `Y(f)` in Siemens directly, and the
+//! [`RationalModel::eval`] at `s = j*2*pi*f` reconstructs `Y(f)` in Siemens directly, and the
 //! Verilog-A exporter can emit physical-time `ddt` state equations without a hidden scaling.
 //!
-//! Physical mapping from the normalised fit (`K = 2π·fmax`, `s_n = s/K`):
-//! `p_phys = K·p_n`, `R_phys = K·R_n`, `D_phys = D_n`, `E_phys = E_n/K`.
+//! Physical mapping from the normalised fit (`K = 2*pi*fmax`, `s_n = s/K`):
+//! `p_phys = K*p_n`, `R_phys = K*R_n`, `D_phys = D_n`, `E_phys = E_n/K`.
 
 use std::f64::consts::TAU;
 
 use super::model::VfModel;
 use super::C;
 
-/// A fitted `p`-port rational admittance macromodel `Y(s) = D + sE + Σ_k R_k/(s − p_k)`, with a
-/// **common pole set** shared by all `p²` matrix entries, in **physical** units (`s = j·2π·f`,
+/// A fitted `p`-port rational admittance macromodel `Y(s) = D + sE + Sigma_k R_k/(s - p_k)`, with a
+/// **common pole set** shared by all `p^2` matrix entries, in **physical** units (`s = j*2*pi*f`,
 /// `Y` in Siemens, poles in rad/s).
 ///
 /// Poles are stored split into strictly-real poles and complex-conjugate *pair representatives*
-/// (`Im > 0`; the conjugate is implied) — the form both the real state-space realisation
+/// (`Im > 0`; the conjugate is implied): the form both the real state-space realisation
 /// (passivity) and the Verilog-A 2nd-order sections consume. Matrix entries are flattened
-/// row-major: entry `e = i·p + j` is `Y_ij` (observed port `i`, driven port `j`).
+/// row-major: entry `e = i*p + j` is `Y_ij` (observed port `i`, driven port `j`).
 #[derive(Clone, Debug)]
 pub struct RationalModel {
     /// Number of ports `p`.
@@ -31,45 +31,45 @@ pub struct RationalModel {
     pub real_poles: Vec<f64>,
     /// Complex-pole pair representatives [rad/s] (`Re < 0`, `Im > 0`); each implies its conjugate.
     pub cpx_poles: Vec<C>,
-    /// Real-pole residues, `res_real[e][k]` for entry `e`, pole `real_poles[k]` [S·rad/s].
+    /// Real-pole residues, `res_real[e][k]` for entry `e`, pole `real_poles[k]` [S*rad/s].
     pub res_real: Vec<Vec<f64>>,
-    /// Complex-pole residues, `res_cpx[e][k]` for entry `e`, pair `cpx_poles[k]` [S·rad/s].
+    /// Complex-pole residues, `res_cpx[e][k]` for entry `e`, pair `cpx_poles[k]` [S*rad/s].
     pub res_cpx: Vec<Vec<C>>,
     /// Constant term `D` per entry [S].
     pub d: Vec<f64>,
-    /// Proportional term `E` per entry (`sE` feedthrough) [S·s].
+    /// Proportional term `E` per entry (`sE` feedthrough) [S*s].
     pub e: Vec<f64>,
-    /// √s skin-effect branch coefficient per entry [S/√(rad/s)]; all-zero for a
-    /// purely rational model. Captures the Kramers-Kronig-consistent √f surface-
+    /// sqrt(s) skin-effect branch coefficient per entry [S/sqrt(rad/s)]; all-zero for a
+    /// purely rational model. Captures the Kramers-Kronig-consistent sqrt(f) surface-
     /// impedance pair that is outside the rational class.
     /// Present in [`eval`](Self::eval) and the passivity grid scan; the
-    /// Verilog-A export rejects models with a significant √s part (not
+    /// Verilog-A export rejects models with a significant sqrt(s) part (not
     /// realisable in the ddt-only grammar) and the Hamiltonian crossing
     /// localisation ignores it (the dense scan still covers it).
     pub sq: Vec<f64>,
     /// Port names in network-matrix order.
     pub port_names: Vec<String>,
-    /// Per-port reference impedances [Ω].
+    /// Per-port reference impedances [Ohm].
     pub z0: Vec<f64>,
     /// Fitted frequency band [Hz].
     pub fmin: f64,
     pub fmax: f64,
     /// Max relative fit error achieved over the fit samples (per-entry, magnitude-weighted).
     pub fit_error: f64,
-    /// The fit sample frequencies [Hz] (anchors, or the tabulated grid) — retained so passivity
+    /// The fit sample frequencies [Hz] (anchors, or the tabulated grid), retained so passivity
     /// enforcement and the export gate can report the true fit error.
     pub fit_freqs: Vec<f64>,
-    /// The fit sample data: `fit_data[k]` is the flattened `p²` admittance at `fit_freqs[k]` [S].
+    /// The fit sample data: `fit_data[k]` is the flattened `p^2` admittance at `fit_freqs[k]` [S].
     pub fit_data: Vec<Vec<C>>,
 }
 
 impl RationalModel {
-    /// Number of poles (real + 2×complex pairs) — the model order.
+    /// Number of poles (real + 2*complex pairs): the model order.
     pub fn n_poles(&self) -> usize {
         self.real_poles.len() + 2 * self.cpx_poles.len()
     }
 
-    /// Assess passivity (Hamiltonian localisation + dense `λ_min(Φ)` scan).
+    /// Assess passivity (Hamiltonian localisation + dense `lambda_min(Phi)` scan).
     pub fn passivity(&self) -> super::passivity::PassivityReport {
         super::passivity::check(self)
     }
@@ -91,7 +91,7 @@ impl RationalModel {
         crate::export::export_verilog_a(self, name, date, force, threshold)
     }
 
-    /// Evaluate matrix entry `e = i·p + j` at frequency `f` [Hz]: `Y_ij(j·2π·f)` [S].
+    /// Evaluate matrix entry `e = i*p + j` at frequency `f` [Hz]: `Y_ij(j*2*pi*f)` [S].
     pub fn eval_entry(&self, e: usize, f: f64) -> C {
         let s = C::new(0.0, TAU * f);
         let mut v = C::new(self.d[e], 0.0)
@@ -107,7 +107,7 @@ impl RationalModel {
         v
     }
 
-    /// Evaluate the full `p×p` admittance at `f` [Hz], flattened row-major (`e = i·p + j`).
+    /// Evaluate the full `pxp` admittance at `f` [Hz], flattened row-major (`e = i*p + j`).
     pub fn eval(&self, f: f64) -> Vec<C> {
         (0..self.n_ports * self.n_ports)
             .map(|e| self.eval_entry(e, f))
@@ -131,9 +131,9 @@ impl RationalModel {
         worst
     }
 
-    /// Build a physical model from a normalised [`VfModel`] fit (`s_n = j·f/fmax`). `fmin_hz`/
+    /// Build a physical model from a normalised [`VfModel`] fit (`s_n = j*f/fmax`). `fmin_hz`/
     /// `fmax_hz` are the fitted band; the fit samples (`fit_freqs`/`fit_data`, physical) are stored.
-    /// Build from a raw engine [`VfModel`](crate::VfModel) plus the fit context —
+    /// Build from a raw engine [`VfModel`](crate::VfModel) plus the fit context:
     /// the bridge an embedding solver (e.g. a ROM frequency sweep) uses.
     pub fn from_vf(
         vf: &VfModel,
@@ -148,10 +148,6 @@ impl RationalModel {
         assert!(
             vf.delay.iter().all(|&t| t == 0.0),
             "a fit with delays has no rational admittance form"
-        );
-        assert!(
-            vf.real,
-            "a complex fit is not the response of a real system"
         );
         let k = TAU * fmax_hz; // normalisation constant s_n = s / K
         let p2 = n_ports * n_ports;
@@ -179,7 +175,7 @@ impl RationalModel {
         }
         let d: Vec<f64> = (0..p2).map(|e| vf.cst[e].re).collect();
         let e_prop: Vec<f64> = (0..p2).map(|e| vf.dif[e].re / k).collect();
-        // √(s) = √(K·s_n) = √K·√s_n ⇒ physical coefficient = normalised / √K.
+        // sqrt(s) = sqrt(K*s_n) = sqrt(K)*sqrt(s_n) => physical coefficient = normalised / sqrt(K).
         let sq: Vec<f64> = (0..p2).map(|e| vf.sqt[e].re / k.sqrt()).collect();
 
         let mut m = RationalModel {
@@ -205,10 +201,10 @@ impl RationalModel {
 }
 
 /// Fit tabulated `p`-port admittance data `Y(f)` with the relaxed vector-fitting engine and return
-/// the physical [`RationalModel`]. `data[k]` is the flattened `p²` admittance at `freqs[k]` [Hz].
+/// the physical [`RationalModel`]. `data[k]` is the flattened `p^2` admittance at `freqs[k]` [Hz].
 /// `max_poles` caps the model order; `tol` is the relative convergence target.
 ///
-/// The engine fits on the normalised axis `s_n = j·f/fmax`; the returned model is denormalised to
+/// The engine fits on the normalised axis `s_n = j*f/fmax`; the returned model is denormalised to
 /// physical units.
 pub fn fit(
     freqs: &[f64],
@@ -236,9 +232,9 @@ pub fn fit(
 }
 
 /// Fit with a **fixed** initial order (`n_cpx` complex-conjugate pairs + `n_real` real poles), no
-/// automatic order selection. The total pole count `n_real + 2·n_cpx` is preserved through
+/// automatic order selection. The total pole count `n_real + 2*n_cpx` is preserved through
 /// relocation, so fitting every parameter anchor with the SAME `(n_cpx, n_real)` yields models of a
-/// COMMON order — the prerequisite for a determined, spare-DOF-free common-basis conversion (a
+/// COMMON order: the prerequisite for a determined, spare-DOF-free common-basis conversion (a
 /// mixed-order set, as `fit_auto`'s parsimony can produce across anchors, makes the parametric
 /// coefficient interpolation non-unique and non-smooth). Used by the parametric fit.
 pub fn fit_fixed(
