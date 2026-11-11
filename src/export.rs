@@ -3,11 +3,11 @@
 //! lowers): no `$table_model`, no mid-range conditionals, only `ddt` + constant-coefficient
 //! linear contributions (so the whole device is trivially smooth for gradient/Hessian AD).
 //!
-//! Realisation: the common-pole form `Y(s) = D + sE + Σ_k R_k/(s − p_k)` becomes a real
-//! state-space with one internal node per state. Each **real pole** → a 1st-order section; each
-//! **complex-conjugate pair** → a real 2nd-order section (2×2 rotation block). States are scaled by
-//! `K = 2π·fmax` so the internal node voltages are `O(1)` (well-conditioned for the analog solver)
-//! while `ddt` stays physical. Port currents `I(pᵢ, gnd) <+ Σ …` realise the admittance directly
+//! Realisation: the common-pole form `Y(s) = D + sE + Sigma_k R_k/(s - p_k)` becomes a real
+//! state-space with one internal node per state. Each **real pole** -> a 1st-order section; each
+//! **complex-conjugate pair** -> a real 2nd-order section (2x2 rotation block). States are scaled by
+//! `K = 2*pi*fmax` so the internal node voltages are `O(1)` (well-conditioned for the analog solver)
+//! while `ddt` stays physical. Port currents `I(p_i, gnd) <+ Sigma ...` realise the admittance directly
 //! (natural for MNA). An explicit `gnd` terminal is emitted because a Verilog-A module references
 //! only its own terminals (SANE requirement), not the netlist global reference.
 //!
@@ -20,10 +20,10 @@ use std::fmt::Write as _;
 use crate::passivity::{self, PassivityReport};
 use crate::ratmodel::RationalModel;
 
-/// Fixed-precision, sign-normalised float literal (no `-0`, 12 significant digits) — the basis of
+/// Fixed-precision, sign-normalised float literal (no `-0`, 12 significant digits): the basis of
 /// the deterministic, byte-stable output.
 fn f(x: f64) -> String {
-    let x = if x == 0.0 { 0.0 } else { x }; // normalise -0.0 → 0.0
+    let x = if x == 0.0 { 0.0 } else { x }; // normalise -0.0 -> 0.0
     format!("{:.12e}", x)
 }
 
@@ -54,7 +54,7 @@ fn ident(s: &str, fallback: &str) -> String {
 pub struct ExportError {
     pub fit_error: f64,
     pub threshold: f64,
-    /// `true` when the rejection is the √s skin-effect term (not realisable in
+    /// `true` when the rejection is the sqrt(s) skin-effect term (not realisable in
     /// the ddt-only grammar), not the fit error.
     pub sqrt_term: bool,
 }
@@ -80,7 +80,7 @@ impl std::fmt::Display for ExportError {
 impl std::error::Error for ExportError {}
 
 /// Generate the Verilog-A source for `model`. `name` is the module/geometry name, `date` a caller-
-/// supplied provenance date string (kept explicit for deterministic codegen — no wall clock).
+/// supplied provenance date string (kept explicit for deterministic codegen: no wall clock).
 /// `threshold` gates export on the achieved relative fit error unless `force`. The passivity of the
 /// model is assessed and recorded in the header/metadata.
 pub fn export_verilog_a(
@@ -97,9 +97,9 @@ pub fn export_verilog_a(
             sqrt_term: false,
         });
     }
-    // A √s branch term has no exact ddt-only realisation. "Significant" is
+    // A sqrt(s) branch term has no exact ddt-only realisation. "Significant" is
     // judged against the model's own scale at the top of the fitted band,
-    // where √f is largest.
+    // where sqrt(f) is largest.
     if !force {
         let wtop = TAU * model.fmax;
         let scale = model
@@ -121,7 +121,7 @@ pub fn export_verilog_a(
     Ok(render(model, name, date, threshold, &pass))
 }
 
-/// The pure, deterministic string builder (no I/O, no clock) — the unit-test seam.
+/// The pure, deterministic string builder (no I/O, no clock): the unit-test seam.
 fn render(
     model: &RationalModel,
     name: &str,
@@ -140,7 +140,7 @@ fn render(
     let v = |node: &str| format!("V({node} , gnd)");
 
     let mut s = String::new();
-    // ── provenance header ────────────────────────────────────────────────────
+    // -- provenance header ----------------------------------------------------
     let _ = writeln!(
         s,
         "// ============================================================================"
@@ -186,7 +186,7 @@ fn render(
         s,
         "// ============================================================================"
     );
-    // ── machine-readable metadata (fixed grammar) ─────────────────
+    // -- machine-readable metadata (fixed grammar) -----------------
     let _ = writeln!(s, "// >>> VECTFIT-META");
     let meta = [
         ("schema".to_string(), "1".to_string()),
@@ -219,7 +219,7 @@ fn render(
     let _ = writeln!(s, "`include \"disciplines.vams\"");
     let _ = writeln!(s);
 
-    // ── module + terminals ───────────────────────────────────────────────────
+    // -- module + terminals ---------------------------------------------------
     let terms: Vec<String> = (0..p)
         .map(port)
         .chain(std::iter::once("gnd".to_string()))
@@ -252,7 +252,7 @@ fn render(
     let _ = writeln!(s, "    analog begin");
     let _ = writeln!(s, "        Kf = {};", f(k));
 
-    // ── state equations ──────────────────────────────────────────────────────
+    // -- state equations ------------------------------------------------------
     // Real pole kk, component comp: ddt(X) - pr*X - K*V(p_comp) = 0.
     for kk in 0..nr {
         let pr = model.real_poles[kk];
@@ -300,8 +300,8 @@ fn render(
     }
     let _ = writeln!(s);
 
-    // ── port currents ────────────────────────────────────────────────────────
-    // I(p_i,gnd) <+ Σ_states C*V(state) + Σ_j D_ij V(p_j) + Σ_j E_ij ddt(V(p_j)).
+    // -- port currents --------------------------------------------------------
+    // I(p_i,gnd) <+ Sigma_states C*V(state) + Sigma_j D_ij V(p_j) + Sigma_j E_ij ddt(V(p_j)).
     for i in 0..p {
         let _ = writeln!(s, "        I({} , gnd) <+", port(i));
         let mut terms: Vec<String> = Vec::new();

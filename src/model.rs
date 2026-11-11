@@ -1,29 +1,25 @@
 //! The fitted macromodel produced by the vector fit: a common pole set with per-entry residues,
-//! const/proportional terms and an optional per-entry delay. Evaluated at `s = jω` (normalised)
+//! const/proportional terms and an optional per-entry delay. Evaluated at `s = j*omega` (normalised)
 //! to reconstruct the response.
 
 use super::C;
 
 /// Fitted model: common `poles` (expanded: the real poles first, then each c.c. pair as the pole
 /// and its conjugate), per-entry `res[e]` residues, per-entry constant `cst` / proportional `dif`
-/// (s·h) terms, and per-entry delays: entry `e` is `exp(-s·delay[e])` times its rational part.
-/// A complex model ([`crate::Options::real`] off) has its poles unpaired and complex
-/// coefficients: a function on the band, not the response of a real system.
+/// (s*h) terms, and per-entry delays: entry `e` is `exp(-s*delay[e])` times its rational part.
 #[derive(Clone, Debug)]
 pub struct VfModel {
     pub(super) poles: Vec<C>,
     pub(super) res: Vec<Vec<C>>,
     pub(super) cst: Vec<C>,
     pub(super) dif: Vec<C>,
-    /// Per-entry √s (skin-effect branch) coefficient; all-zero unless the fit
+    /// Per-entry sqrt(s) (skin-effect branch) coefficient; all-zero unless the fit
     /// ran with the sqrt term enabled ([`crate::Options::sqrt`]).
     pub(super) sqt: Vec<C>,
     /// Per-entry delay on the normalised axis; all-zero unless the fit took delays
     /// ([`crate::Options::delays`]).
     pub(super) delay: Vec<f64>,
     pub(super) d: usize,
-    /// A real model (c.c. pairs, real coefficients), or a complex one.
-    pub(super) real: bool,
 }
 
 impl VfModel {
@@ -36,30 +32,13 @@ impl VfModel {
         self.poles.len()
     }
 
-    /// Whether it is the response of a real system (`S(-jω) = S(jω)*`): poles real or in c.c.
-    /// pairs, real constants; a complex model ([`crate::Options::real`] off) is not.
-    pub fn real(&self) -> bool {
-        self.real
-    }
-
-    /// The real unknowns per entry its poles take: one per real pole, two per c.c. pair, two per
-    /// pole of a complex model (its residue's real and imaginary part, as a pair's). The order a
-    /// fit's `max_poles` caps ([`crate::fit_auto_opts`]).
-    pub fn unknowns(&self) -> usize {
-        if self.real {
-            self.poles.len()
-        } else {
-            2 * self.poles.len()
-        }
-    }
-
     /// The number of entries (functions) the model fits.
     pub fn n_entries(&self) -> usize {
         self.d
     }
 
     /// The poles: the real ones first, then each c.c. pair as the pole (`Im > 0`) and its
-    /// conjugate; a complex model's in no order.
+    /// conjugate.
     pub fn poles(&self) -> &[C] {
         &self.poles
     }
@@ -74,7 +53,7 @@ impl VfModel {
         self.cst[e]
     }
 
-    /// The proportional (`s·h`) coefficient of entry `e`.
+    /// The proportional (`s*h`) coefficient of entry `e`.
     pub fn proportional(&self, e: usize) -> C {
         self.dif[e]
     }

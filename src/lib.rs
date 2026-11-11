@@ -1,6 +1,6 @@
 //! Fast Relaxed Vector Fitting (Gustavsen-Semlyen 1999; relaxed pole relocation, Gustavsen
 //! 2006; multiport, Deschrijver 2008) with automatic order selection by adding-and-skimming
-//! (Grivet-Talocia-Bandinu 2006) — a set-valued macromodel of a matrix response on the jω axis
+//! (Grivet-Talocia-Bandinu 2006): a set-valued macromodel of a matrix response on the j*omega axis
 //! with COMMON poles. Ported (compact, clean-room from the algorithm) from the author's
 //! Python package [Vectorfitting](https://github.com/milanofthe/Vectorfitting).
 //!
@@ -8,10 +8,10 @@
 //! is extractable as a standalone crate. [`fit`] is the fixed-order primitive; [`fit_auto`] grows
 //! and skims the pole set to the minimal one that meets a target error.
 //!
-//! Per relocation step: identify the weighting σ with a RELAXED constant `d_relax` (so the pole
-//! relocation is not biased by the σ(∞)=1 normalisation), get the new poles as the zeros of σ
-//! (eigenvalues of `A − b·rᵀ/d_relax`), reflect unstable poles, then fit the residues. Real and
-//! complex-conjugate poles are tracked separately. The σ LS is the small full system (our
+//! Per relocation step: identify the weighting sigma with a RELAXED constant `d_relax` (so the pole
+//! relocation is not biased by the sigma(inf)=1 normalisation), get the new poles as the zeros of sigma
+//! (eigenvalues of `A - b*r^T/d_relax`), reflect unstable poles, then fit the residues. Real and
+//! complex-conjugate poles are tracked separately. The sigma LS is the small full system (our
 //! port/anchor counts are modest, so the block-QR "fast" trick of the reference buys little).
 
 use num_complex::Complex;
@@ -19,7 +19,7 @@ use num_complex::Complex;
 pub type C = Complex<f64>;
 
 /// Pin faer's process-global parallelism to sequential, once. The LS panels
-/// here are small (2·ns × order), so faer-internal parallelism buys nothing —
+/// here are small (2*ns x order), so faer-internal parallelism buys nothing:
 /// but its pool-width-dependent reductions would break the bit-identical
 /// guarantee of the (entry-parallel) fit. Self-contained (no dependency on
 /// the host crate) so the module stays extractable as a standalone crate.

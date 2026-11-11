@@ -1,6 +1,6 @@
-//! The relaxed vector-fitting engine: the `Vf` least-squares workspace (σ identification → pole
-//! relocation → residue fit), the fixed-order [`fit`], and the automatic-order [`fit_auto`] with
-//! Grivet-Talocia/Bandinu-style *adding and skimming* — grow the pole set at the worst-error band,
+//! The relaxed vector-fitting engine: the `Vf` least-squares workspace (sigma identification -> pole
+//! relocation -> residue fit), the fixed-order [`fit`], and the automatic-order [`fit_auto`] with
+//! Grivet-Talocia/Bandinu-style *adding and skimming*: grow the pole set at the worst-error band,
 //! drop spurious poles by their band-limited energy, until the response is met with a minimal set.
 //!
 //! [`fit_auto_opts`] takes the basis, the weighting, per-entry delays, the poles to start from and
@@ -16,12 +16,8 @@ use rayon::prelude::*;
 use super::model::VfModel;
 use super::C;
 
-/// Partial-fraction basis at `s = jω`, written into caller-owned slices (no allocation):
-/// `xs` = the σ part [real, cpx-re, cpx-im]; `xf` = [const?, diff?, sqrt?] ++ `xs`, every
-/// coefficient real. A real model (`real`) takes a c.c. pair per complex pole, `1/(s - p) +
-/// 1/(s - p*)` and `j/(s - p) - j/(s - p*)` for the real and imaginary part of its residue; a
-/// complex one (no real poles) the pole alone, `1/(s - p)` and `j/(s - p)`, and the optional terms
-/// with an imaginary part too, `j`, `js` and `j√s` after `1`, `s` and `√s`. A free function so
+/// Partial-fraction basis at `s = j*omega`, written into caller-owned slices (no allocation):
+/// `xs` = the sigma part [real, cpx-re, cpx-im]; `xf` = [const?, diff?, sqrt?] ++ `xs`. A free function so
 /// the caller can fill its scratch buffers while holding the (disjoint) pole fields by ref.
 #[allow(clippy::too_many_arguments)]
 fn fill_x_into(
@@ -31,26 +27,16 @@ fn fill_x_into(
     fit_const: bool,
     fit_diff: bool,
     fit_sqrt: bool,
-    real: bool,
     xf: &mut [C],
     xs: &mut [C],
 ) {
     let nr = pr.len();
-    let j = C::new(0.0, 1.0);
     for (i, &p) in pr.iter().enumerate() {
         xs[i] = C::new(1.0, 0.0) / (s - C::new(p, 0.0));
     }
     for (i, &p) in pc.iter().enumerate() {
-        let (a, b) = if real {
-            (
-                C::new(1.0, 0.0) / (s - p) + C::new(1.0, 0.0) / (s - p.conj()),
-                j / (s - p) - j / (s - p.conj()),
-            )
-        } else {
-            (C::new(1.0, 0.0) / (s - p), j / (s - p))
-        };
-        xs[nr + i] = a;
-        xs[nr + pc.len() + i] = b;
+        xs[nr + i] = C::new(1.0, 0.0) / (s - p) + C::new(1.0, 0.0) / (s - p.conj());
+        xs[nr + pc.len() + i] = C::new(0.0, 1.0) / (s - p) - C::new(0.0, 1.0) / (s - p.conj());
     }
     let mut o = 0;
     if fit_const {
@@ -62,18 +48,12 @@ fn fill_x_into(
         o += 1;
     }
     if fit_sqrt {
-        // Skin-effect branch term √s (principal branch): on the jω axis
-        // √(jω) = (1+j)·√(ω/2) — one REAL coefficient captures the
+        // Skin-effect branch term sqrt(s) (principal branch): on the j*omega axis
+        // sqrt(j*omega) = (1+j)*sqrt(omega/2): one REAL coefficient captures the
         // Kramers-Kronig-consistent resistance+inductance pair that a rational
         // basis can only chase with spurious poles.
         xf[o] = s.sqrt();
         o += 1;
-    }
-    if !real {
-        for k in 0..o {
-            xf[o + k] = j * xf[k];
-        }
-        o *= 2;
     }
     xf[o..].copy_from_slice(xs);
 }
@@ -82,13 +62,13 @@ fn fill_x_into(
 /// error a fit is judged on (the fit itself, [`crate::ratmodel::RationalModel::sample_error`]).
 ///
 /// Relative (`relative`): the inverse magnitude of the sample. A matrix response spans a huge
-/// magnitude range across entries (a spiral's off-diagonal Y is ~1000× its diagonal); plain
+/// magnitude range across entries (a spiral's off-diagonal Y is ~1000x its diagonal); plain
 /// absolute least-squares fits the large entries and leaves the small ones at ~10% relative
-/// error — invisible to an absolute residual, so the order growth stops too early. Weighting
+/// error: invisible to an absolute residual, so the order growth stops too early. Weighting
 /// every equation by 1/|data| makes each entry fit to its OWN relative accuracy and the
 /// convergence metric track relative error. The magnitude is floored per entry at a share of
 /// its MEDIAN magnitude, not the band peak: a sharp resonance peak would otherwise raise the
-/// floor so far that every off-peak sample of the entry is under-weighted — the fit then reports
+/// floor so far that every off-peak sample of the entry is under-weighted: the fit then reports
 /// convergence while the off-peak band (where L/Q curves live) is wrong. The small peak term
 /// keeps true transmission zeros from being weighted as noise.
 ///
@@ -129,15 +109,15 @@ pub(crate) fn weights(data: &[Vec<C>], relative: bool) -> Vec<Vec<f64>> {
 /// searches the order ([`fit_auto_opts`]).
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// The proportional term `s·h` per entry: an admittance or impedance grows with frequency
+    /// The proportional term `s*h` per entry: an admittance or impedance grows with frequency
     /// (a capacitance, an inductance); a bounded response (scattering parameters) has none.
     pub proportional: bool,
-    /// The √s skin-effect branch term per entry ([`fit_auto_with`]).
+    /// The sqrt(s) skin-effect branch term per entry ([`fit_auto_with`]).
     pub sqrt: bool,
     /// Relative weights, `tol` a relative error; off, absolute ones ([`weights`]).
     pub relative: bool,
     /// Per-entry delays on the normalised axis (empty: none): entry `e` is modelled as
-    /// `exp(-s·delays[e])` times a rational function, so a propagation delay costs no poles. The
+    /// `exp(-s*delays[e])` times a rational function, so a propagation delay costs no poles. The
     /// fit takes the delays out of the samples, fits the rational parts and puts the delays back
     /// into the model ([`VfModel::eval`]); [`crate::phase_slope`] estimates them from the samples.
     pub delays: Vec<f64>,
@@ -157,24 +137,16 @@ pub struct Options {
     /// Pairs added in a row without lowering the rms error before the order is final.
     pub patience: usize,
     /// The smallest magnitude of the relaxation constant `d`: below it `d` is fixed at this
-    /// magnitude (its sign kept) and σ solved again without the relaxation row (Gustavsen).
+    /// magnitude (its sign kept) and sigma solved again without the relaxation row (Gustavsen).
     pub relax_floor: f64,
     /// `tol` bounds the largest weighted error over the samples and entries instead of the rms,
     /// and the order grows while that falls: a response of many entries whose tolerance holds
     /// for every entry, where a few entries off by more than it hardly move the rms.
     pub max_error: bool,
-    /// A real model: poles real or in c.c. pairs, real coefficients, the response of a real
-    /// system (`S(-jω) = S(jω)*`), analytic across DC. Off, a complex model: every pole on its
-    /// own with a complex residue, complex constant and optional terms, a function on the band
-    /// alone. It fits samples that are no real rational function, one whose continuation to
-    /// negative frequencies has a kink at DC: a dielectric of constant loss tangent from DC
-    /// (`G = ωC·tanδ` there, `|ω|` mirrored, which no real rational function follows). A complex
-    /// pole counts as two in `max_poles`, the real unknowns of its residue, as a pair does.
-    pub real: bool,
 }
 
 impl Default for Options {
-    /// The admittance fit: the proportional term, no √s term, relative weights, no delays, the
+    /// The admittance fit: the proportional term, no sqrt(s) term, relative weights, no delays, the
     /// spread start, and the order search of [`fit_auto`].
     fn default() -> Self {
         Options {
@@ -189,13 +161,12 @@ impl Default for Options {
             patience: 3,
             relax_floor: 1e-12,
             max_error: false,
-            real: true,
         }
     }
 }
 
 struct Vf<'a> {
-    s: &'a [C],         // jω samples (normalised)
+    s: &'a [C],         // j*omega samples (normalised)
     data: &'a [Vec<C>], // [sample][entry]
     nf: usize,
     // the LS weights wt[sample][entry] ([`weights`]); all one where `uniform`
@@ -208,21 +179,19 @@ struct Vf<'a> {
     fit_const: bool,
     fit_diff: bool,
     fit_sqrt: bool,
-    // a real model (c.c. pairs, real coefficients) or a complex one ([`Options::real`])
-    real: bool,
-    pr: Vec<f64>, // real poles (negative); none in a complex model
-    pc: Vec<C>,   // complex poles, one per c.c. pair (Re<0, Im>0); in a complex model every pole
+    pr: Vec<f64>, // real poles (negative)
+    pc: Vec<C>,   // complex poles, one per c.c. pair (Re<0, Im>0)
     // F residues per entry, and const/diff
     rr: Vec<Vec<C>>, // [entry][real pole]
     rc: Vec<Vec<C>>, // [entry][cpx pole]
     cst: Vec<C>,
     dif: Vec<C>,
     sqt: Vec<C>,
-    // σ residues + relaxation
+    // sigma residues + relaxation
     sr: Vec<f64>,
     sc: Vec<C>,
     d_relax: f64,
-    // reused scratch for the cached partial fractions (xf: n·nrf, xs: n·nrs)
+    // reused scratch for the cached partial fractions (xf: n*nrf, xs: n*nrs)
     xf: Vec<C>,
     xs: Vec<C>,
 }
@@ -243,7 +212,6 @@ impl<'a> Vf<'a> {
             fit_const: true,
             fit_diff: true,
             fit_sqrt: false,
-            real: true,
             pr,
             pc,
             rr: Vec::new(),
@@ -259,11 +227,8 @@ impl<'a> Vf<'a> {
         }
     }
 
-    /// The columns of the constant and the optional terms: one each, two in a complex model (a
-    /// real and an imaginary part).
     fn ncd(&self) -> usize {
-        (self.fit_const as usize + self.fit_diff as usize + self.fit_sqrt as usize)
-            * if self.real { 1 } else { 2 }
+        self.fit_const as usize + self.fit_diff as usize + self.fit_sqrt as usize
     }
     fn nrf(&self) -> usize {
         self.ncd() + self.pr.len() + 2 * self.pc.len()
@@ -289,42 +254,41 @@ impl<'a> Vf<'a> {
                 self.fit_const,
                 self.fit_diff,
                 self.fit_sqrt,
-                self.real,
                 xf,
                 xs,
             );
         }
     }
 
-    /// Relaxed σ identification: solve for the σ residues and the relaxation constant `d_relax`
+    /// Relaxed sigma identification: solve for the sigma residues and the relaxation constant `d_relax`
     /// jointly over ALL entries (common poles), with a normalisation row that forbids the
-    /// trivial σ≡0. The per-entry F residues are nuisance unknowns here (refit later). Where
-    /// `|d_relax|` comes out below the floor, it is fixed there (its sign kept) and σ is solved
+    /// trivial sigma==0. The per-entry F residues are nuisance unknowns here (refit later). Where
+    /// `|d_relax|` comes out below the floor, it is fixed there (its sign kept) and sigma is solved
     /// again without the normalisation row, the `d` column on the right-hand side (Gustavsen).
     fn compute_sigma(&mut self) {
         let (n, nf) = (self.s.len(), self.nf);
         let (nrf, nrs) = (self.nrf(), self.nrs());
-        let nu = nrs + 1; // σ residues + d_relax (the only shared unknowns)
+        let nu = nrs + 1; // sigma residues + d_relax (the only shared unknowns)
         if 2 * n <= nrf {
-            return; // a per-entry block cannot determine its F residues — keep current poles
+            return; // a per-entry block cannot determine its F residues: keep current poles
         }
         self.cache_x();
         // FAST (Deschrijver): the per-entry F residues are nuisance unknowns. For each entry,
-        // QR `[X_F | −X_S·D | −D]` and keep only the σ-block R22 (the rows orthogonal to X_F's
-        // column space) — this eliminates the F residues. Stacking R22 over entries gives a
-        // SMALL shared σ system (nf·rblk+1 × nu) instead of the full nf·nrf+nu-wide one. The
+        // QR `[X_F | -X_S*D | -D]` and keep only the sigma-block R22 (the rows orthogonal to X_F's
+        // column space): this eliminates the F residues. Stacking R22 over entries gives a
+        // SMALL shared sigma system (nf*rblk+1 x nu) instead of the full nf*nrf+nu-wide one. The
         // data RHS is 0, so the projected RHS is 0 and Q is never needed.
         let ncol = nrf + nu;
         let rblk = (2 * n).min(ncol) - nrf; // R22 rows each entry contributes
         if nf * rblk + 1 < nu {
-            return; // stacked σ system under-determined (rows < cols) — keep current poles
+            return; // stacked sigma system under-determined (rows < cols): keep current poles
         }
         let (xf, xs, data) = (&self.xf, &self.xs, self.data);
         let mut rr = Mat::<f64>::zeros(nf * rblk + 1, nu);
         let wt = &self.wt;
         // The per-entry QRs are independent (disjoint R22 blocks) and dominate the
-        // fit cost on multiport responses (nf = p² entries) — run them in the
-        // ambient rayon pool. Assembly stays in entry order, so the stacked σ
+        // fit cost on multiport responses (nf = p^2 entries): run them in the
+        // ambient rayon pool. Assembly stays in entry order, so the stacked sigma
         // system (and the whole fit) is bit-identical to the serial path.
         let r22: Vec<Vec<f64>> = (0..nf)
             .into_par_iter()
@@ -366,7 +330,7 @@ impl<'a> Vf<'a> {
                 }
             }
         }
-        // Relaxation row (Re{Σ_k σ basis}·c + N·d_relax = N) forbids the trivial σ≡0.
+        // Relaxation row (Re{Sigma_k sigma basis}*c + N*d_relax = N) forbids the trivial sigma==0.
         for c in 0..nrs {
             rr[(nf * rblk, c)] = (0..n).map(|k| xs[k * nrs + c].re).sum();
         }
@@ -399,31 +363,18 @@ impl<'a> Vf<'a> {
         self.d_relax = d;
     }
 
-    /// New poles = zeros of σ: eigenvalues of `A − b·rᵀ/d_relax` (real block form), split into
-    /// real and c.c.-pair representatives; in a complex model of `diag(p) − 1·cᵀ/d_relax` with
-    /// the complex σ residues `c`, every eigenvalue a pole.
+    /// New poles = zeros of sigma: eigenvalues of `A - b*r^T/d_relax` (real block form), split into
+    /// real and c.c.-pair representatives.
     fn compute_poles(&mut self) {
         let (nr, nc) = (self.pr.len(), self.pc.len());
         let dim = nr + 2 * nc;
         if dim == 0 {
             return;
         }
-        // If the σ residues are out of sync with the pole set (compute_sigma bails on an
-        // under-determined σ system after a pole was seeded/skimmed), σ carries no relocation
-        // information — keep the CURRENT poles instead of indexing stale residues (crash).
+        // If the sigma residues are out of sync with the pole set (compute_sigma bails on an
+        // under-determined sigma system after a pole was seeded/skimmed), sigma carries no relocation
+        // information: keep the CURRENT poles instead of indexing stale residues (crash).
         if self.sr.len() != nr || self.sc.len() != nc {
-            return;
-        }
-        if !self.real {
-            let mut a = Mat::<C>::from_fn(nc, nc, |_, k| -self.sc[k] / self.d_relax);
-            for i in 0..nc {
-                a[(i, i)] += self.pc[i];
-            }
-            if let Ok(e) = a.eigenvalues() {
-                if !e.is_empty() {
-                    self.pc = e;
-                }
-            }
             return;
         }
         let mut a = Mat::<f64>::zeros(dim, dim);
@@ -452,8 +403,8 @@ impl<'a> Vf<'a> {
                 a[(i, k)] -= b[i] * r[k] / self.d_relax;
             }
         }
-        // If the companion eigensolve fails (very ill-conditioned σ), keep the CURRENT poles
-        // rather than collapsing the model to const+diff (empty pole set) — the next iteration
+        // If the companion eigensolve fails (very ill-conditioned sigma), keep the CURRENT poles
+        // rather than collapsing the model to const+diff (empty pole set): the next iteration
         // re-relocates from a valid set instead of silently degrading.
         let eigs = match a.eigenvalues() {
             Ok(e) if !e.is_empty() => e,
@@ -519,8 +470,8 @@ impl<'a> Vf<'a> {
                 .collect()
         } else {
             // Relative weighting makes the basis entry-dependent (each row scaled by
-            // 1/|data[k][e]|), so factor per entry — independent solves, parallel over
-            // the entries (nf = p² on a multiport), collected in entry order
+            // 1/|data[k][e]|), so factor per entry, independent solves, parallel over
+            // the entries (nf = p^2 on a multiport), collected in entry order
             // (bit-identical to serial).
             (0..self.nf)
                 .into_par_iter()
@@ -535,26 +486,21 @@ impl<'a> Vf<'a> {
         self.cst = Vec::with_capacity(self.nf);
         self.dif = Vec::with_capacity(self.nf);
         self.sqt = Vec::with_capacity(self.nf);
-        // the imaginary part of an optional term's coefficient (a complex model): the column
-        // after the real parts of all of them
-        let npoly = fit_const as usize + fit_diff as usize + fit_sqrt as usize;
-        let real = self.real;
-        let coef = |x: &[f64], o: usize| C::new(x[o], if real { 0.0 } else { x[o + npoly] });
         for x in x {
             let mut o = 0;
             let mut cst = C::new(0.0, 0.0);
             if fit_const {
-                cst = coef(&x, o);
+                cst = C::new(x[o], 0.0);
                 o += 1;
             }
             let mut dif = C::new(0.0, 0.0);
             if fit_diff {
-                dif = coef(&x, o);
+                dif = C::new(x[o], 0.0);
                 o += 1;
             }
             let mut sqt = C::new(0.0, 0.0);
             if fit_sqrt {
-                sqt = coef(&x, o); // last poly slot
+                sqt = C::new(x[o], 0.0); // last poly slot
             }
             self.cst.push(cst);
             self.dif.push(dif);
@@ -569,8 +515,8 @@ impl<'a> Vf<'a> {
         }
     }
 
-    /// One relaxed-VF relocation sweep: identify σ, move the poles to its zeros, reflect unstable
-    /// ones back into the left half-plane, refit the residues — repeated until `tol` or `max_steps`.
+    /// One relaxed-VF relocation sweep: identify sigma, move the poles to its zeros, reflect unstable
+    /// ones back into the left half-plane, refit the residues, repeated until `tol` or `max_steps`.
     fn relocate(&mut self, tol: f64, max_steps: usize) {
         for _ in 0..max_steps {
             self.compute_sigma();
@@ -583,11 +529,11 @@ impl<'a> Vf<'a> {
         }
     }
 
-    /// Drop *spurious* poles — those whose isolated resonance carries negligible band-limited
+    /// Drop *spurious* poles: those whose isolated resonance carries negligible band-limited
     /// energy relative to the mean (Grivet-Talocia/Bandinu skimming; scikit-rf `get_spurious`).
-    /// For pole `m` with per-entry residue `r`, `hₘ,ₑ(jω)=r/(jω−p)+r*/(jω−p*)` (a real pole omits
-    /// the conjugate term); its energy `‖hₘ,ₑ‖₂` is measured over the samples. A pole is skimmed
-    /// iff, for EVERY entry, its energy is below `gamma×mean` — i.e. it contributes to none of the
+    /// For pole `m` with per-entry residue `r`, `h_m,e(j*omega)=r/(j*omega-p)+r*/(j*omega-p*)` (a real pole omits
+    /// the conjugate term); its energy `||h_m,e||_2` is measured over the samples. A pole is skimmed
+    /// iff, for EVERY entry, its energy is below `gamma*mean`, i.e. it contributes to none of the
     /// responses and only fits noise. Returns whether anything was removed (caller refits residues).
     fn skim_spurious(&mut self, gamma: f64) -> bool {
         let (nr, nc) = (self.pr.len(), self.pc.len());
@@ -595,11 +541,11 @@ impl<'a> Vf<'a> {
             return false;
         }
         // Residues out of sync with the pole set (compute_residues bailed on an
-        // under-determined system) — no energies to rank, keep every pole.
+        // under-determined system): no energies to rank, keep every pole.
         if self.rr.iter().any(|r| r.len() != nr) || self.rc.iter().any(|r| r.len() != nc) {
             return false;
         }
-        // Band energy e[pole][entry]; poles ordered [real…, cpx…].
+        // Band energy e[pole][entry]; poles ordered [real..., cpx...].
         let npole = nr + nc;
         let mut energy = vec![vec![0.0f64; self.nf]; npole];
         for entry in 0..self.nf {
@@ -614,24 +560,15 @@ impl<'a> Vf<'a> {
             }
             for i in 0..nc {
                 let (p, r) = (self.pc[i], self.rc[entry][i]);
-                let real = self.real;
                 energy[nr + i][entry] = self
                     .s
                     .iter()
-                    .map(|&z| {
-                        let h = r / (z - p);
-                        (if real {
-                            h + r.conj() / (z - p.conj())
-                        } else {
-                            h
-                        })
-                        .norm_sqr()
-                    })
+                    .map(|&z| (r / (z - p) + r.conj() / (z - p.conj())).norm_sqr())
                     .sum::<f64>()
                     .sqrt();
             }
         }
-        // Per-entry mean over poles; a pole is spurious iff below gamma×mean for ALL entries.
+        // Per-entry mean over poles; a pole is spurious iff below gamma*mean for ALL entries.
         let mean: Vec<f64> = (0..self.nf)
             .map(|e| energy.iter().map(|row| row[e]).sum::<f64>() / npole as f64)
             .collect();
@@ -652,24 +589,19 @@ impl<'a> Vf<'a> {
         true
     }
 
-    /// Expand to all poles + per-entry residues (each c.c. pair → the pole and its conjugate; a
-    /// complex model's poles as they are).
+    /// Expand to all poles + per-entry residues (each c.c. pair -> the pole and its conjugate).
     fn model(&self) -> VfModel {
         let mut poles = self.pr.iter().map(|&p| C::new(p, 0.0)).collect::<Vec<_>>();
         for &p in &self.pc {
             poles.push(p);
-            if self.real {
-                poles.push(p.conj());
-            }
+            poles.push(p.conj());
         }
         let res = (0..self.nf)
             .map(|e| {
                 let mut r: Vec<C> = self.rr[e].clone();
                 for &rc in &self.rc[e] {
                     r.push(rc);
-                    if self.real {
-                        r.push(rc.conj());
-                    }
+                    r.push(rc.conj());
                 }
                 r
             })
@@ -682,11 +614,10 @@ impl<'a> Vf<'a> {
             sqt: self.sqt.clone(),
             delay: vec![0.0; self.nf],
             d: self.nf,
-            real: self.real,
         }
     }
 
-    /// Maximum weighted fit error over all samples/entries — each residual weighted by the same
+    /// Maximum weighted fit error over all samples/entries: each residual weighted by the same
     /// `wt` the LS uses ([`weights`]), so the tolerance the greedy chases is a true relative
     /// error on every entry with relative weights (not an absolute one dominated by the
     /// largest-magnitude entry), an absolute one without.
@@ -703,7 +634,7 @@ impl<'a> Vf<'a> {
     }
 
     /// RMS weighted fit error over all samples/entries. Unlike the max, a single pole that nulls
-    /// one anchor's residual barely moves it — so the RMS has a clean elbow at the PHYSICAL pole
+    /// one anchor's residual barely moves it, so the RMS has a clean elbow at the PHYSICAL pole
     /// count, which is what stops the order growth before it fits noise. Relative weighting keeps
     /// the elbow honest when the entries span a large magnitude range. Averaged over the entries
     /// the response has (`norm_entries`): a compressed response is the same sum of squares over
@@ -721,7 +652,7 @@ impl<'a> Vf<'a> {
         (s2 / (self.s.len() * self.norm_entries) as f64).sqrt()
     }
 
-    /// Sample index of the largest (entry-summed) weighted residual — where a new pole should be
+    /// Sample index of the largest (entry-summed) weighted residual: where a new pole should be
     /// seeded (the worst-fit band, matching what the greedy is minimising).
     /// `exclude` skips seed locations already tried this growth round, so a retry after a
     /// non-improving addition explores the NEXT-worst band instead of re-seeding the same spot.
@@ -745,7 +676,7 @@ impl<'a> Vf<'a> {
 }
 
 /// The least-squares solution of `a x = b` by the column-pivoted QR; where `a` is rank deficient
-/// to the last bit (a σ system of more poles than samples that are a rational function of fewer:
+/// to the last bit (a sigma system of more poles than samples that are a rational function of fewer:
 /// its R has exact zero rows, and the QR solve divides by them), the minimum-norm one by the
 /// SVD, singular values below round-off left out.
 fn lstsq(a: &Mat<f64>, b: &Mat<f64>) -> Mat<f64> {
@@ -793,12 +724,12 @@ fn spread_real(n: usize, wmax: f64) -> Vec<f64> {
 const COMPRESS_DROP: f64 = 1e-13;
 
 /// The response `data` (samples x entries) as the real combinations of its entries that span
-/// it: the thin SVD of its real and imaginary parts stacked (`[Re; Im] = U Σ Vᵀ`, real V, so
-/// every combination is the response of a real system again), the columns `U Σ` above
+/// it: the thin SVD of its real and imaginary parts stacked (`[Re; Im] = U Sigma V^T`, real V, so
+/// every combination is the response of a real system again), the columns `U Sigma` above
 /// [`COMPRESS_DROP`] as complex samples. A least-squares fit with given poles leaves the same
 /// residual (the Frobenius norm over all samples and entries) on these as on `data`: its
-/// residual is `(I − P)·[Re; Im]`, and `[Re; Im] = (U Σ) Vᵀ` with orthonormal `Vᵀ`. At most
-/// `2·samples` columns, however many entries.
+/// residual is `(I - P)*[Re; Im]`, and `[Re; Im] = (U Sigma) V^T` with orthonormal `V^T`. At most
+/// `2*samples` columns, however many entries.
 fn compress(data: &[Vec<C>]) -> Vec<Vec<C>> {
     let (ns, nf) = (data.len(), data[0].len());
     let a = Mat::<f64>::from_fn(2 * ns, nf, |r, e| {
@@ -829,7 +760,7 @@ fn compress(data: &[Vec<C>]) -> Vec<Vec<C>> {
 }
 
 /// The delays of `opts` per entry (zeros where it has none), and the samples with them taken out
-/// (`None` where every delay is zero): `exp(s·τ_e)·data_e`, the rational parts a fit models.
+/// (`None` where every delay is zero): `exp(s*tau_e)*data_e`, the rational parts a fit models.
 fn without_delays(s: &[C], data: &[Vec<C>], opts: &Options) -> (Vec<f64>, Option<Vec<Vec<C>>>) {
     let nf = data[0].len();
     let delays = if opts.delays.is_empty() {
@@ -853,15 +784,8 @@ fn without_delays(s: &[C], data: &[Vec<C>], opts: &Options) -> (Vec<f64>, Option
 }
 
 /// Poles as [`VfModel::poles`] lists them split into the c.c. pair representatives (`Im > 0`)
-/// and the real poles, every one moved into the left half-plane; for a complex model (`real`
-/// off) every pole on its own.
-fn split_poles(poles: &[C], real: bool) -> (Vec<C>, Vec<f64>) {
-    if !real {
-        return (
-            poles.iter().map(|p| C::new(-p.re.abs(), p.im)).collect(),
-            Vec::new(),
-        );
-    }
+/// and the real poles, every one moved into the left half-plane.
+fn split_poles(poles: &[C]) -> (Vec<C>, Vec<f64>) {
     (
         poles
             .iter()
@@ -885,9 +809,8 @@ pub fn fit_residues(s: &[C], data: &[Vec<C>], poles: &[C], opts: &Options) -> Op
     super::pin_faer_sequential();
     let (delays, shifted) = without_delays(s, data, opts);
     let data = shifted.as_deref().unwrap_or(data);
-    let (pc, pr) = split_poles(poles, opts.real);
+    let (pc, pr) = split_poles(poles);
     let mut vf = Vf::new(s, data, pc, pr, opts.relative);
-    vf.real = opts.real;
     vf.fit_diff = opts.proportional;
     vf.fit_sqrt = opts.sqrt;
     if 2 * s.len() < vf.nrf() {
@@ -902,7 +825,7 @@ pub fn fit_residues(s: &[C], data: &[Vec<C>], poles: &[C], opts: &Options) -> Op
 /// Fixed-order set-valued fit by relaxed vector fitting. `n_cpx`/`n_real` are the initial pole
 /// counts; `tol`/`max_steps` the relocation convergence target. The order is whatever the poles
 /// relocate to (a c.c. pair may split into two reals or vice-versa), NOT trimmed here. The
-/// fixed-order primitive `fit_auto` builds on — part of the public surface, exercised by the tests.
+/// fixed-order primitive `fit_auto` builds on, part of the public surface, exercised by the tests.
 #[allow(dead_code)]
 pub fn fit(
     s: &[C],
@@ -931,17 +854,17 @@ pub fn fit(
 /// seeded at the worst-error band, relocate, then skim poles whose band energy is spurious. Stop at
 /// `tol`, when a new pair no longer cuts the RMS error (parsimony), or at the over-determination
 /// cap. This decouples the model order from the anchor count and never fits solver noise into
-/// spurious poles — the source of the between-anchor wobble/spikes. `max_poles` caps the order.
+/// spurious poles: the source of the between-anchor wobble/spikes. `max_poles` caps the order.
 pub fn fit_auto(s: &[C], data: &[Vec<C>], tol: f64, max_poles: usize) -> VfModel {
     fit_auto_with(s, data, tol, max_poles, false)
 }
 
-/// [`fit_auto`] with an optional **√s skin-effect branch term** in the basis:
-/// surface impedance goes as √f, which is not rational —
+/// [`fit_auto`] with an optional **sqrt(s) skin-effect branch term** in the basis:
+/// surface impedance goes as sqrt(f), which is not rational:
 /// a common-pole fit floors at ~1e-3 on wide lossy bands with the residual
-/// error piled at the top band edge. One real √s coefficient per entry (the
+/// error piled at the top band edge. One real sqrt(s) coefficient per entry (the
 /// KK-consistent resistance+inductance pair) removes that floor. The LS drives
-/// the coefficient to ~0 when the data carries no √f content, so enabling it
+/// the coefficient to ~0 when the data carries no sqrt(f) content, so enabling it
 /// is safe whenever enough samples support the extra column.
 pub fn fit_auto_with(
     s: &[C],
@@ -962,9 +885,9 @@ pub fn fit_auto_with(
     )
 }
 
-/// [`fit_auto`] with the basis, weights, delays, start and order search of `opts`, the model real
-/// or complex ([`Options::real`]). The order never exceeds `max_poles` (counting both members of
-/// a c.c. pair, and a pole of a complex model as two), nor what the samples determine: the spread start is one c.c. pair and one real pole where both fit, fewer where
+/// [`fit_auto`] with the basis, weights, delays, start and order search of `opts`. The order
+/// never exceeds `max_poles` (counting both members of a c.c. pair), nor what the samples
+/// determine: the spread start is one c.c. pair and one real pole where both fit, fewer where
 /// they do not. With absolute weights and more entries than real equations a sample, the poles
 /// are identified on the compressed response ([`compress`]) and the residues of every entry
 /// fitted with them at the end.
@@ -992,7 +915,7 @@ pub fn fit_auto_opts(
         .map(|z| z.im.abs())
         .filter(|&w| w > 0.0)
         .fold(wmax, f64::min);
-    // Common-pole σ identification is over-determined only for nc ≤ (2·ns·nf − 3nf − 1)/(2(nf+1)).
+    // Common-pole sigma identification is over-determined only for nc <= (2*ns*nf - 3nf - 1)/(2(nf+1)).
     let nc_lim = (2 * ns * nq).saturating_sub(3 * nq + 1) / (2 * (nq + 1));
     let max_cpx = (max_poles / 2).min(nc_lim);
     // The starting order: the given poles where the order may take them, else one c.c. pair
@@ -1006,35 +929,24 @@ pub fn fit_auto_opts(
     // they are: they come from a fit of the response, and a pair added to them unsettles a pole
     // set that already meets it (a filter's model then alternated between two sets of its order
     // from fit to fit); a plateau they start on is left by the doubling below.
-    // (the real unknowns per entry: a real pole one, a pair two, a pole of a complex model two)
-    let per_pole = if opts.real { 1 } else { 2 };
-    let ncd = (1 + opts.proportional as usize + opts.sqrt as usize) * per_pole;
+    let ncd = 1 + opts.proportional as usize + opts.sqrt as usize;
     let room = max_poles.min((2 * ns).saturating_sub(ncd));
-    let (pc0, pr0) = if !opts.start.is_empty() && per_pole * opts.start.len() <= room {
-        split_poles(&opts.start, opts.real)
+    let (pc0, pr0) = if !opts.start.is_empty() && opts.start.len() <= room {
+        split_poles(&opts.start)
     } else {
-        // (the pole at the lowest sample: real, a complex model's on the real axis)
-        let (n_cpx0, n_real0) = if room >= 2 + per_pole {
-            (1, 1)
-        } else if room >= 2 {
-            (1, 0)
-        } else if room >= per_pole {
-            (0, 1)
-        } else {
-            (0, 0)
+        let (n_cpx0, n_real0) = match room {
+            0 => (0, 0),
+            1 => (0, 1),
+            2 => (1, 0),
+            _ => (1, 1),
         };
         let n_turns = crate::delay::phase_turns(s, data).ceil() as usize;
         let n_cpx = n_cpx0
             .max(n_turns)
             .min(max_cpx)
-            .min(room.saturating_sub(n_real0 * per_pole) / 2)
+            .min(room.saturating_sub(n_real0) / 2)
             .max(n_cpx0);
-        let mut pc = spread_cpx(n_cpx, wmax);
-        let mut pr = vec![-wlo; n_real0];
-        if !opts.real {
-            pc.extend(pr.drain(..).map(|p| C::new(p, 0.0)));
-        }
-        (pc, pr)
+        (spread_cpx(n_cpx, wmax), vec![-wlo; n_real0])
     };
 
     // the error the order is grown on: the rms, or the largest error over the response itself
@@ -1048,7 +960,6 @@ pub fn fit_auto_opts(
             return vf.err_max();
         }
         let mut full = Vf::new(s, data, vf.pc.clone(), vf.pr.clone(), opts.relative);
-        full.real = opts.real;
         full.fit_diff = opts.proportional;
         full.fit_sqrt = opts.sqrt;
         full.compute_residues();
@@ -1058,7 +969,6 @@ pub fn fit_auto_opts(
     // growth (see there)
     let start_at = |pc: Vec<C>, pr: Vec<f64>| -> Vf {
         let mut vf = Vf::new(s, ident, pc, pr, opts.relative);
-        vf.real = opts.real;
         vf.norm_entries = nf;
         vf.relax_floor = opts.relax_floor;
         vf.fit_diff = opts.proportional;
@@ -1089,7 +999,7 @@ pub fn fit_auto_opts(
     );
 
     // Growth patience: a single non-improving addition is NOT proof the order is
-    // exhausted — multi-resonance data routinely plateaus while growing through an
+    // exhausted: multi-resonance data routinely plateaus while growing through an
     // intermediate order (the added pair lands on one resonance, the RMS is still
     // dominated by the next unseen one). Allow up to `patience` consecutive misses,
     // seeding each retry at the next-worst band, before declaring parsimony.
@@ -1102,7 +1012,7 @@ pub fn fit_auto_opts(
             && misses < opts.patience
         {
             // A further c.c. pair must keep BOTH least-squares stages over-determined
-            // (per-entry F residues: 2·ns > nrf; σ additionally needs its shared block) —
+            // (per-entry F residues: 2*ns > nrf; sigma additionally needs its shared block):
             // otherwise compute_residues/compute_sigma bail and the model cannot improve.
             // nr can grow during relocation (c.c. pairs splitting into real poles), so this
             // is checked per iteration, not folded into max_cpx up front.
@@ -1118,11 +1028,11 @@ pub fn fit_auto_opts(
             vf.compute_residues();
             vf.relocate(tol, opts.relocations);
             // Guarded skim: the energy criterion compares against the MEAN pole energy,
-            // which resonance-dominated responses inflate — a freshly seeded pair then
+            // which resonance-dominated responses inflate: a freshly seeded pair then
             // reads as "spurious" before it can specialise, and the order can never grow
             // (measured: every added pair was skimmed right back, three misses, stall at
             // 7 poles / rms 1.5e-2). A genuinely spurious pole contributes nothing, so
-            // removing it leaves the RMS unchanged — accept a skim only on that evidence,
+            // removing it leaves the RMS unchanged: accept a skim only on that evidence,
             // and roll it back when the RMS degrades (the pole was load-bearing).
             let n_before = vf.pr.len() + vf.pc.len();
             let pre_err = score(&vf);
@@ -1197,7 +1107,6 @@ pub fn fit_auto_opts(
         // the residues of every entry with the poles identified on the compressed response
         let (pr, pc) = best_poles;
         let mut full = Vf::new(s, data, pc, pr, opts.relative);
-        full.real = opts.real;
         full.fit_diff = opts.proportional;
         full.fit_sqrt = opts.sqrt;
         full.compute_residues();
@@ -1242,7 +1151,7 @@ mod par_tests {
     }
 
     /// The parallel per-entry LS stages must be bit-identical across pool sizes
-    /// (disjoint outputs, fixed assembly order) — the crate-wide determinism
+    /// (disjoint outputs, fixed assembly order): the crate-wide determinism
     /// contract extends to the vector fit.
     #[test]
     fn fit_is_bit_identical_across_thread_counts() {
@@ -1298,98 +1207,6 @@ mod par_tests {
             .map(|(&z, row)| (m.eval(z)[0] - row[0]).norm())
             .fold(0.0, f64::max);
         assert!(err < 1e-6, "error {err:e} with {} poles", m.order());
-    }
-
-    /// A capacitor behind a port on a dielectric of constant loss tangent, sampled from DC: its
-    /// conductance `ωC·tanδ` continues to negative frequencies as `|ω|`, which no real rational
-    /// function follows, and the real fit stops near `tanδ`; the complex fit, a function on the
-    /// band alone, meets it with a pole, and a warm start from its poles keeps it.
-    #[test]
-    fn a_loss_tangent_from_dc_takes_a_complex_fit() {
-        let s: Vec<C> = (0..41).map(|i| C::new(0.0, i as f64 / 40.0)).collect();
-        let (x, tan_d) = (2.5, 2e-3);
-        let data: Vec<Vec<C>> = s
-            .iter()
-            .map(|&z| {
-                let y = z * x * C::new(1.0, -tan_d);
-                vec![(C::new(1.0, 0.0) - y) / (C::new(1.0, 0.0) + y)]
-            })
-            .collect();
-        let err = |m: &VfModel| -> f64 {
-            s.iter()
-                .zip(&data)
-                .map(|(&z, row)| (m.eval(z)[0] - row[0]).norm())
-                .fold(0.0, f64::max)
-        };
-        let real = Options {
-            proportional: false,
-            relative: false,
-            max_error: true,
-            ..Options::default()
-        };
-        let m = fit_auto_opts(&s, &data, 1e-9, 20, &real);
-        assert!(m.real() && err(&m) > 1e-4, "real fit {:e}", err(&m));
-        let complex = Options {
-            real: false,
-            ..real
-        };
-        let m = fit_auto_opts(&s, &data, 1e-9, 20, &complex);
-        assert!(!m.real() && err(&m) < 1e-9, "complex fit {:e}", err(&m));
-        assert!(m.unknowns() <= 20 && m.unknowns() == 2 * m.order());
-        let again = fit_auto_opts(
-            &s,
-            &data,
-            1e-9,
-            20,
-            &Options {
-                start: m.poles().to_vec(),
-                ..complex
-            },
-        );
-        assert!(
-            err(&again) < 1e-9,
-            "warm-started complex fit {:e}",
-            err(&again)
-        );
-    }
-
-    /// The complex fit of a real response (a shared-pole multiport): it meets it as the real fit
-    /// does, with no more unknowns than the real fit takes twice.
-    #[test]
-    fn a_complex_fit_meets_a_real_response() {
-        let (s, data) = synth(120, 6, 4);
-        let opts = Options {
-            proportional: false,
-            relative: false,
-            max_error: true,
-            ..Options::default()
-        };
-        let real = fit_auto_opts(&s, &data, 1e-8, 40, &opts);
-        let complex = fit_auto_opts(
-            &s,
-            &data,
-            1e-8,
-            40,
-            &Options {
-                real: false,
-                ..opts
-            },
-        );
-        for m in [&real, &complex] {
-            let e = s
-                .iter()
-                .zip(&data)
-                .flat_map(|(&z, row)| {
-                    let got = m.eval(z);
-                    row.iter()
-                        .zip(got)
-                        .map(|(a, b)| (a - b).norm())
-                        .collect::<Vec<_>>()
-                })
-                .fold(0.0, f64::max);
-            assert!(e < 1e-8, "real {}: error {e:e}", m.real());
-        }
-        assert!(complex.unknowns() <= 2 * real.unknowns());
     }
 
     #[test]
@@ -1465,7 +1282,7 @@ mod par_tests {
 mod sqrt_tests {
     use super::*;
 
-    /// Rational part + a √s skin term, like a lossy-metal wide-band response.
+    /// Rational part + a sqrt(s) skin term, like a lossy-metal wide-band response.
     fn synth_skin(ns: usize, nf: usize, c_sqrt: f64) -> (Vec<C>, Vec<Vec<C>>) {
         let s: Vec<C> = (0..ns)
             .map(|i| C::new(0.0, 0.02 + 1.0 * i as f64 / (ns - 1) as f64))
@@ -1488,7 +1305,7 @@ mod sqrt_tests {
         (s, data)
     }
 
-    /// The rational-only fit floors on √f content; the √s basis term removes
+    /// The rational-only fit floors on sqrt(f) content; the sqrt(s) basis term removes
     /// the floor and recovers the coefficient.
     #[test]
     fn sqrt_term_removes_the_rational_floor() {
@@ -1525,7 +1342,7 @@ mod sqrt_tests {
         }
     }
 
-    /// Without √f content the extra column is driven to ~zero — enabling the
+    /// Without sqrt(f) content the extra column is driven to ~zero: enabling the
     /// term is harmless on clean rational data.
     #[test]
     fn sqrt_term_is_inert_on_rational_data() {

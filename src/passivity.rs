@@ -2,21 +2,21 @@
 //!
 //! A `p`-port admittance `Y(s)` is **passive** (positive-real) iff `Y` is analytic in the open
 //! right half-plane (guaranteed: the fit is stable, poles in the LHP) and its Hermitian part
-//! `Φ(ω) = ½(Y(jω) + Y(jω)^H) ⪰ 0` for all `ω`. For a reciprocal (symmetric `Y`) network this is
-//! `Re{Y(jω)} ⪰ 0`. A non-passive macromodel can make a transient simulator blow up, so we both
+//! `Phi(omega) = (1/2)(Y(j*omega) + Y(j*omega)^H) >= 0` for all `omega`. For a reciprocal (symmetric `Y`) network this is
+//! `Re{Y(j*omega)} >= 0`. A non-passive macromodel can make a transient simulator blow up, so we both
 //! **check** and (optionally) **enforce**.
 //!
 //! Check = two cross-checking mechanisms:
-//! NOTE (√s models): the grid scan and bisection refine evaluate the FULL model —
-//! including the optional √s skin-effect term — so violation detection covers it; only the
-//! Hamiltonian crossing localisation below is blind to the (non-rational) √s part and may miss a
+//! NOTE (sqrt(s) models): the grid scan and bisection refine evaluate the FULL model
+//! (including the optional sqrt(s) skin-effect term), so violation detection covers it; only the
+//! Hamiltonian crossing localisation below is blind to the (non-rational) sqrt(s) part and may miss a
 //! crossing it induces. The dense scan is the belt for exactly this reason.
 //!
-//! 1. **Hamiltonian imaginary-eigenvalue test** — build a real state-space realisation
-//!    (complex-conjugate pole pairs → 2×2 real blocks), form the positive-real Hamiltonian matrix;
-//!    its purely-imaginary eigenvalues `jω₀` localise the frequencies where an eigenvalue of `Φ`
+//! 1. **Hamiltonian imaginary-eigenvalue test**: build a real state-space realisation
+//!    (complex-conjugate pole pairs -> 2x2 real blocks), form the positive-real Hamiltonian matrix;
+//!    its purely-imaginary eigenvalues `j*omega_0` localise the frequencies where an eigenvalue of `Phi`
 //!    crosses zero (the violation-band boundaries).
-//! 2. **Dense frequency-grid scan** — evaluate `λ_min(Φ(ω))` on a log grid over the band (and a
+//! 2. **Dense frequency-grid scan**: evaluate `lambda_min(Phi(omega))` on a log grid over the band (and a
 //!    margin beyond); the authoritative source for the passivity margin and the violation bands.
 //!
 //! Enforcement = Gustavsen FRP-style residue perturbation: at each violating (frequency,
@@ -35,16 +35,16 @@ use super::C;
 /// A passivity assessment: the margin, where it occurs, and the violation bands.
 #[derive(Clone, Debug)]
 pub struct PassivityReport {
-    /// `true` iff `λ_min(Φ(ω)) ≥ −tol` everywhere on the scan.
+    /// `true` iff `lambda_min(Phi(omega)) >= -tol` everywhere on the scan.
     pub passive: bool,
-    /// The worst (smallest) eigenvalue of `Φ(ω)` over the scan [S]. `≥ 0` ⇒ passive.
+    /// The worst (smallest) eigenvalue of `Phi(omega)` over the scan [S]. `>= 0` => passive.
     pub margin: f64,
     /// Frequency [Hz] at which `margin` occurs.
     pub worst_freq: f64,
-    /// Violation bands `[(f_lo, f_hi)]` [Hz] where `λ_min(Φ) < 0`.
+    /// Violation bands `[(f_lo, f_hi)]` [Hz] where `lambda_min(Phi) < 0`.
     pub bands: Vec<(f64, f64)>,
     /// Purely-imaginary Hamiltonian eigenfrequencies [Hz] (crossing-frequency localisation);
-    /// empty if `D + Dᵀ` is singular (the scan is then the sole authority).
+    /// empty if `D + D^T` is singular (the scan is then the sole authority).
     pub crossings: Vec<f64>,
 }
 
@@ -80,9 +80,9 @@ pub struct EnforceReport {
     pub success: bool,
 }
 
-// ── small dense linear algebra on flat row-major Vec<f64> ─────────────────────
+// -- small dense linear algebra on flat row-major Vec<f64> ---------------------
 
-/// Invert a `p×p` row-major matrix by Gauss-Jordan with partial pivoting. `None` if singular.
+/// Invert a `pxp` row-major matrix by Gauss-Jordan with partial pivoting. `None` if singular.
 fn inv(a: &[f64], p: usize) -> Option<Vec<f64>> {
     let mut m = a.to_vec();
     let mut inv = vec![0.0; p * p];
@@ -131,10 +131,10 @@ fn inv(a: &[f64], p: usize) -> Option<Vec<f64>> {
     Some(inv)
 }
 
-// ── Hermitian part and its spectrum ───────────────────────────────────────────
+// -- Hermitian part and its spectrum -------------------------------------------
 
-/// `Φ = ½(Y + Y^H)` reduced to its real symmetric part (exact for a reciprocal, symmetric `Y`;
-/// the symmetric part of `Re{Y}` otherwise), as a `p×p` row-major matrix.
+/// `Phi = (1/2)(Y + Y^H)` reduced to its real symmetric part (exact for a reciprocal, symmetric `Y`;
+/// the symmetric part of `Re{Y}` otherwise), as a `pxp` row-major matrix.
 fn phi_matrix(y: &[C], p: usize) -> Vec<f64> {
     let mut phi = vec![0.0; p * p];
     for i in 0..p {
@@ -145,8 +145,8 @@ fn phi_matrix(y: &[C], p: usize) -> Vec<f64> {
     phi
 }
 
-/// Smallest eigenvalue and its (unit) eigenvector of a `p×p` real symmetric matrix. Closed-form for
-/// `p ≤ 2` (the common port counts, exact and fast); for `p > 2` the faer general eigensolver gives
+/// Smallest eigenvalue and its (unit) eigenvector of a `pxp` real symmetric matrix. Closed-form for
+/// `p <= 2` (the common port counts, exact and fast); for `p > 2` the faer general eigensolver gives
 /// the value and inverse iteration the vector.
 fn sym_min_eig(phi: &[f64], p: usize) -> (f64, Vec<f64>) {
     if p == 1 {
@@ -157,7 +157,7 @@ fn sym_min_eig(phi: &[f64], p: usize) -> (f64, Vec<f64>) {
         let mid = 0.5 * (a + d);
         let r = (0.25 * (a - d) * (a - d) + b * b).sqrt();
         let lam = mid - r;
-        // (Φ − λI) is rank-1; a null vector is [b, λ−a] (or an axis if b≈0).
+        // (Phi - lambda*I) is rank-1; a null vector is [b, lambda-a] (or an axis if b~0).
         let v = if b.abs() > 1e-300 {
             [b, lam - a]
         } else if a <= d {
@@ -179,7 +179,7 @@ fn sym_min_eig(phi: &[f64], p: usize) -> (f64, Vec<f64>) {
             .fold(f64::INFINITY, f64::min),
     };
     let spread = phi.iter().fold(0.0f64, |m, &v| m.max(v.abs())).max(1e-12);
-    let mu = lam - 1e-4 * spread; // shift just below λ_min so (Φ − μI) is invertible
+    let mu = lam - 1e-4 * spread; // shift just below lambda_min so (Phi - mu*I) is invertible
     let shifted: Vec<f64> = (0..p * p)
         .map(|k| phi[k] - if k / p == k % p { mu } else { 0.0 })
         .collect();
@@ -197,21 +197,21 @@ fn sym_min_eig(phi: &[f64], p: usize) -> (f64, Vec<f64>) {
     (lam, x)
 }
 
-/// `(λ_min, eigenvector of λ_min)` of the Hermitian part of `Y` at one frequency.
+/// `(lambda_min, eigenvector of lambda_min)` of the Hermitian part of `Y` at one frequency.
 fn min_eig(y: &[C], p: usize) -> (f64, Vec<f64>) {
     sym_min_eig(&phi_matrix(y, p), p)
 }
 
 /// Dense log-frequency grid over the model's **validity range**: the fitted band plus a modest
 /// guard (a transient simulator can excite just outside the band), the near-DC limit, and a far
-/// asymptotic point (`Y(∞) = D` must itself be positive-real). We deliberately do NOT chase
-/// passivity far out of band — there the fit is pure extrapolation and forcing it corrupts the
+/// asymptotic point (`Y(inf) = D` must itself be positive-real). We deliberately do NOT chase
+/// passivity far out of band: there the fit is pure extrapolation and forcing it corrupts the
 /// in-band model.
 fn scan_grid(model: &RationalModel, n: usize) -> Vec<f64> {
     let flo = model.fmin * 0.2;
     let fhi = model.fmax * 2.0;
     let mut g = Vec::with_capacity(2 * n + 2);
-    g.push(model.fmax * 1e-6); // ω→0 proxy
+    g.push(model.fmax * 1e-6); // omega->0 proxy
     let (la, lb) = (flo.ln(), fhi.ln());
     for i in 0..n {
         g.push((la + (lb - la) * i as f64 / (n as f64 - 1.0)).exp());
@@ -226,7 +226,7 @@ fn scan_grid(model: &RationalModel, n: usize) -> Vec<f64> {
     g
 }
 
-/// Scan `λ_min(Φ(ω))` on the grid; return `(margin, worst_freq, bands)`.
+/// Scan `lambda_min(Phi(omega))` on the grid; return `(margin, worst_freq, bands)`.
 fn scan(model: &RationalModel, grid: &[f64]) -> (f64, f64, Vec<(f64, f64)>) {
     let p = model.n_ports;
     let mut margin = f64::INFINITY;
@@ -240,7 +240,7 @@ fn scan(model: &RationalModel, grid: &[f64]) -> (f64, f64, Vec<(f64, f64)>) {
             worst_f = f;
         }
     }
-    // Violation bands: contiguous runs of λ_min < 0 (boundaries bisection-refined).
+    // Violation bands: contiguous runs of lambda_min < 0 (boundaries bisection-refined).
     let tol = -1e-12 * model_scale(model);
     let mut bands = Vec::new();
     let mut i = 0;
@@ -269,7 +269,7 @@ fn scan(model: &RationalModel, grid: &[f64]) -> (f64, f64, Vec<(f64, f64)>) {
     (margin, worst_f, bands)
 }
 
-/// Bisect the sign change of `λ_min(Φ)` between `fa` (violating or not) and `fb` to locate a band
+/// Bisect the sign change of `lambda_min(Phi)` between `fa` (violating or not) and `fb` to locate a band
 /// boundary frequency [Hz].
 fn refine(model: &RationalModel, fa: f64, fb: f64) -> f64 {
     let p = model.n_ports;
@@ -287,7 +287,7 @@ fn refine(model: &RationalModel, fa: f64, fb: f64) -> f64 {
     0.5 * (a + b)
 }
 
-/// A representative conductance scale: the max diagonal `Re{Y(jω)}` over the validity band (the
+/// A representative conductance scale: the max diagonal `Re{Y(j*omega)}` over the validity band (the
 /// actual level `Re{Y}` sits at), for scale-relative tolerances and the enforcement target margin.
 /// Falls back to `|D|` if the band evaluation is degenerate.
 fn model_scale(model: &RationalModel) -> f64 {
@@ -305,21 +305,21 @@ fn model_scale(model: &RationalModel) -> f64 {
     s.max(1e-12)
 }
 
-// ── real state-space realisation + Hamiltonian crossings ──────────────────────
+// -- real state-space realisation + Hamiltonian crossings ----------------------
 
 struct Realization {
-    a: Vec<f64>,    // N×N
-    b: Vec<f64>,    // N×p
-    c: Vec<f64>,    // p×N
-    dmat: Vec<f64>, // p×p
+    a: Vec<f64>,    // NxN
+    b: Vec<f64>,    // Nxp
+    c: Vec<f64>,    // pxN
+    dmat: Vec<f64>, // pxp
     n: usize,
     p: usize,
 }
 
-/// Build the **normalised** (`s_n = s/K`, `K = 2π·fmax`) real state-space realisation of `Y`
-/// (ignoring the `sE` feedthrough, which contributes only to the imaginary part on `jω` and so
-/// does not affect `Φ`). Real pole → `p` states; complex pair → `2p` real states (2×2 rotation
-/// blocks). `C(s_nI − A)^{-1}B + D` reconstructs the (physical-equal) admittance.
+/// Build the **normalised** (`s_n = s/K`, `K = 2*pi*fmax`) real state-space realisation of `Y`
+/// (ignoring the `sE` feedthrough, which contributes only to the imaginary part on `j*omega` and so
+/// does not affect `Phi`). Real pole -> `p` states; complex pair -> `2p` real states (2x2 rotation
+/// blocks). `C(s_nI - A)^{-1}B + D` reconstructs the (physical-equal) admittance.
 fn realize(model: &RationalModel) -> Realization {
     let p = model.n_ports;
     let k = TAU * model.fmax;
@@ -373,15 +373,15 @@ fn realize(model: &RationalModel) -> Realization {
 }
 
 /// Purely-imaginary eigenfrequencies [Hz] of the positive-real Hamiltonian matrix
-/// `M = [[A − B R⁻¹C, −B R⁻¹Bᵀ],[Cᵀ R⁻¹C, −Aᵀ + Cᵀ R⁻¹Bᵀ]]`, `R = D + Dᵀ` — the frequencies
-/// where an eigenvalue of `Φ` crosses zero. Empty if `R` is singular.
+/// `M = [[A - B R^-1 C, -B R^-1 B^T],[C^T R^-1 C, -A^T + C^T R^-1 B^T]]`, `R = D + D^T`: the frequencies
+/// where an eigenvalue of `Phi` crosses zero. Empty if `R` is singular.
 fn hamiltonian_crossings(model: &RationalModel) -> Vec<f64> {
     let r = realize(model);
     let (n, p) = (r.n, r.p);
     if n == 0 {
         return Vec::new();
     }
-    // R = D + Dᵀ and its inverse.
+    // R = D + D^T and its inverse.
     let mut rmat = vec![0.0; p * p];
     for i in 0..p {
         for j in 0..p {
@@ -392,9 +392,9 @@ fn hamiltonian_crossings(model: &RationalModel) -> Vec<f64> {
         return Vec::new();
     };
     // helpers on r's flat blocks
-    let bt = |i: usize, j: usize| r.b[j * p + i]; // Bᵀ[i,j] = B[j,i]
-    let ct = |i: usize, j: usize| r.c[j * n + i]; // Cᵀ[i,j] = C[j,i]
-                                                  // Rinv·C  (p×n), Rinv·Bᵀ (p×n)
+    let bt = |i: usize, j: usize| r.b[j * p + i]; // B^T[i,j] = B[j,i]
+    let ct = |i: usize, j: usize| r.c[j * n + i]; // C^T[i,j] = C[j,i]
+                                                  // Rinv*C  (pxn), Rinv*B^T (pxn)
     let mut ric = vec![0.0; p * n];
     let mut rib = vec![0.0; p * n];
     for i in 0..p {
@@ -414,11 +414,11 @@ fn hamiltonian_crossings(model: &RationalModel) -> Vec<f64> {
     let set = |m: &mut Vec<f64>, i: usize, j: usize, v: f64| m[i * dim + j] = v;
     for i in 0..n {
         for j in 0..n {
-            // M11 = A − B·(Rinv·C)
+            // M11 = A - B*(Rinv*C)
             let mut m11 = r.a[i * n + j];
-            let mut m12 = 0.0; // -B·(Rinv·Bᵀ)
-            let mut m21 = 0.0; // Cᵀ·(Rinv·C)
-            let mut m22 = -r.a[j * n + i]; // −Aᵀ
+            let mut m12 = 0.0; // -B*(Rinv*B^T)
+            let mut m21 = 0.0; // C^T*(Rinv*C)
+            let mut m22 = -r.a[j * n + i]; // -A^T
             for l in 0..p {
                 m11 -= r.b[i * p + l] * ric[l * n + j];
                 m12 -= r.b[i * p + l] * rib[l * n + j];
@@ -437,10 +437,10 @@ fn hamiltonian_crossings(model: &RationalModel) -> Vec<f64> {
     };
     let mut out = Vec::new();
     for e in eigs {
-        // purely imaginary: |Re| ≪ |Im|
+        // purely imaginary: |Re| << |Im|
         if e.im.abs() > 1e-9 && e.re.abs() <= 1e-6 * e.im.abs() {
             let wn = e.im.abs();
-            out.push(wn * model.fmax); // s_n = j·wn, physical f = wn·fmax
+            out.push(wn * model.fmax); // s_n = j*wn, physical f = wn*fmax
         }
     }
     out.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -448,9 +448,9 @@ fn hamiltonian_crossings(model: &RationalModel) -> Vec<f64> {
     out
 }
 
-// ── public check ──────────────────────────────────────────────────────────────
+// -- public check --------------------------------------------------------------
 
-/// Assess passivity of `model`: dense-grid `λ_min(Φ)` scan (authoritative margin + bands) with the
+/// Assess passivity of `model`: dense-grid `lambda_min(Phi)` scan (authoritative margin + bands) with the
 /// Hamiltonian crossing frequencies as a localisation cross-check.
 pub fn check(model: &RationalModel) -> PassivityReport {
     let crossings = hamiltonian_crossings(model);
@@ -462,7 +462,7 @@ pub fn check(model: &RationalModel) -> PassivityReport {
             grid.push(fc * (1.0 + d));
         }
     }
-    // Clamp to the validity range (≤ 2·fmax): a crossing/notch beyond it is pure extrapolation.
+    // Clamp to the validity range (<= 2*fmax): a crossing/notch beyond it is pure extrapolation.
     let fhi = model.fmax * 2.0;
     grid.retain(|f| f.is_finite() && *f > 0.0 && *f <= fhi);
     grid.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -476,13 +476,13 @@ pub fn check(model: &RationalModel) -> PassivityReport {
     }
 }
 
-// ── enforcement (Gustavsen FRP-style residue perturbation) ───────────────────
+// -- enforcement (Gustavsen FRP-style residue perturbation) -------------------
 
 /// The (normalised) residue/`D` degrees of freedom, laid out per symmetric matrix entry
-/// `σ = (a,b)` with `a ≤ b`, then per pole. Perturbing a symmetric entry mirrors to `(b,a)`, so
-/// `Y` stays reciprocal (and `Φ` stays real symmetric).
+/// `sigma = (a,b)` with `a <= b`, then per pole. Perturbing a symmetric entry mirrors to `(b,a)`, so
+/// `Y` stays reciprocal (and `Phi` stays real symmetric).
 struct DofLayout {
-    /// symmetric entries (a,b), a ≤ b
+    /// symmetric entries (a,b), a <= b
     sym: Vec<(usize, usize)>,
     nr: usize,
     nc: usize,
@@ -502,7 +502,7 @@ impl DofLayout {
             nc: model.cpx_poles.len(),
         }
     }
-    /// DOFs per symmetric entry: 1 (D) + nr (real residues) + 2·nc (complex residues).
+    /// DOFs per symmetric entry: 1 (D) + nr (real residues) + 2*nc (complex residues).
     fn per_entry(&self) -> usize {
         1 + self.nr + 2 * self.nc
     }
@@ -511,7 +511,7 @@ impl DofLayout {
     }
 }
 
-/// Add `alpha·x` (normalised residue/`D` perturbation) into the physical model, mirroring each
+/// Add `alpha*x` (normalised residue/`D` perturbation) into the physical model, mirroring each
 /// symmetric entry so `Y` stays reciprocal (residues scale by `K` back to physical).
 fn apply_perturbation(
     model: &mut RationalModel,
@@ -552,7 +552,7 @@ fn apply_perturbation(
 /// Enforce passivity by iterated minimum-norm residue perturbation (Gustavsen FRP), with a
 /// trust-region step so a fix never corrupts the in-band fit. Mutates `model` in place; returns the
 /// before/after report. `max_iter` caps the outer iterations. Passivity is enforced over the
-/// model's *validity range* only (see [`scan_grid`]) — chasing out-of-band extrapolation would
+/// model's *validity range* only (see [`scan_grid`]): chasing out-of-band extrapolation would
 /// wreck the fit for no physical gain.
 pub fn enforce(model: &mut RationalModel, max_iter: usize) -> EnforceReport {
     let before = check(model);
@@ -575,7 +575,7 @@ pub fn enforce(model: &mut RationalModel, max_iter: usize) -> EnforceReport {
             break;
         }
         iters += 1;
-        // Build well-separated control points where λ_min < target (dedup collinear clusters:
+        // Build well-separated control points where lambda_min < target (dedup collinear clusters:
         // one point per ~3 % frequency step keeps the least-squares well-conditioned). The
         // Hamiltonian crossing frequencies are added densely so thin resonant violation notches
         // between the log-grid points are caught.
@@ -607,7 +607,7 @@ pub fn enforce(model: &mut RationalModel, max_iter: usize) -> EnforceReport {
                     continue;
                 }
                 let base = si * layout.per_entry();
-                row[base] += q; // D dof: φ = 1
+                row[base] += q; // D dof: phi = 1
                 for kk in 0..layout.nr {
                     let prn = model.real_poles[kk] / k;
                     row[base + 1 + kk] += q * (C::new(1.0, 0.0) / (sn - C::new(prn, 0.0))).re;
@@ -627,8 +627,8 @@ pub fn enforce(model: &mut RationalModel, max_iter: usize) -> EnforceReport {
             break;
         }
         // Regularised least-squares in DOF space (there are more violation constraints than DOFs):
-        // minimise ‖A x − c‖² + λ‖x‖² ⇒ (AᵀA + λI) x = Aᵀc. The ridge both conditions the normal
-        // matrix and keeps the perturbation ‖x‖ small (fit preservation).
+        // minimise ||A x - c||^2 + lambda||x||^2 => (A^T A + lambda*I) x = A^T c. The ridge both conditions the normal
+        // matrix and keeps the perturbation ||x|| small (fit preservation).
         let nviol = rows.len();
         let mut ata = vec![0.0f64; ndof * ndof];
         let mut atc = vec![0.0f64; ndof];
@@ -695,10 +695,13 @@ pub fn enforce(model: &mut RationalModel, max_iter: usize) -> EnforceReport {
 #[cfg(test)]
 mod eigtests {
     use super::sym_min_eig;
-    /// `Φ x = λ_min x` and `λ_min` correct for 2×2 and general symmetric matrices.
+    /// `Phi x = lambda_min x` and `lambda_min` correct for 2x2 and general symmetric matrices.
     fn check_pair(a: &[f64], p: usize, want_lam: f64) {
         let (lam, x) = sym_min_eig(a, p);
-        assert!((lam - want_lam).abs() < 1e-9, "λ_min {lam} != {want_lam}");
+        assert!(
+            (lam - want_lam).abs() < 1e-9,
+            "lambda_min {lam} != {want_lam}"
+        );
         let nrm = x.iter().map(|v| v * v).sum::<f64>().sqrt();
         assert!((nrm - 1.0).abs() < 1e-9, "eigenvector not unit: {nrm}");
         for i in 0..p {
@@ -718,6 +721,6 @@ mod eigtests {
             &[4.0, 1.0, 2.0, 1.0, 5.0, 3.0, 2.0, 3.0, 6.0],
             3,
             2.194397167422409,
-        ); // numeric λ_min
+        ); // numeric lambda_min
     }
 }
